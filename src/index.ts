@@ -1,2 +1,51 @@
+/**
+ * ts-svg — pure-TypeScript SVG parser, rasterizer, and PNG encoder for Bun/Node.
+ *
+ * Public surface:
+ *   - `parseSVG(svg)` — string → typed element tree
+ *   - `rasterize(root, opts)` — element tree → RGBA framebuffer
+ *   - `encodePng(fb)` — framebuffer → PNG bytes
+ *   - `svgToPng(svg, opts)` — convenience pipeline
+ *   - `Resvg` — `@resvg/resvg-js`-compatible class shim
+ */
+
 export * from './config'
-export * from './types'
+export type {
+  BaseNode,
+  Matrix,
+  RGBA,
+  SVGCircle,
+  SVGElementNode,
+  SVGEllipse,
+  SVGGroup,
+  SVGLine,
+  SVGNode,
+  SVGPath,
+  SVGPolygon,
+  SVGRect,
+  SVGRoot,
+} from './types'
+
+export { parseSVG } from './parser'
+export type { PathCmd } from './path'
+export { arcToCubics, flattenCommands, flattenCubic, flattenQuadratic, parsePath } from './path'
+export type { Framebuffer, RenderOptions } from './render'
+export { rasterize } from './render'
+export { createFramebuffer, fillPolygons, strokePolylines } from './raster'
+export { encodePng } from './png'
+export { applyMatrix, IDENTITY, multiply, parseTransform } from './transform'
+export { BLACK, parseColor, TRANSPARENT, WHITE } from './color'
+export type { ResvgFitTo, ResvgOptions } from './resvg'
+export { RenderedImage, Resvg } from './resvg'
+
+import type { Buffer } from 'node:buffer'
+import { parseSVG } from './parser'
+import { encodePng } from './png'
+import { rasterize, type RenderOptions } from './render'
+
+/** Parse + rasterise + encode in one call. */
+export function svgToPng(svg: string, opts?: RenderOptions): Buffer {
+  const root = parseSVG(svg)
+  const fb = rasterize(root, opts)
+  return encodePng(fb)
+}

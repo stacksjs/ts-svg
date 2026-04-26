@@ -1,8 +1,8 @@
 {
   "name": "ts-svg",
   "type": "module",
-  "version": "0.4.0",
-  "description": "A simple TypeScript starter kit using Bun.",
+  "version": "0.5.0",
+  "description": "Pure-TypeScript SVG parser, rasterizer, and PNG encoder for Bun/Node — drop-in `Resvg`-compatible class plus a typed element-tree API.",
   "author": "Chris Breuer <chris@stacksjs.org>",
   "license": "MIT",
   "homepage": "https://github.com/stacksjs/ts-svg#readme",
@@ -15,10 +15,13 @@
   },
   "keywords": [
     "typescript",
-    "starter",
-    "kit",
     "bun",
-    "package"
+    "svg",
+    "rasterizer",
+    "png",
+    "resvg",
+    "renderer",
+    "vector"
   ],
   "exports": {
     ".": {
@@ -70,7 +73,11 @@
     "format": "bunx --bun pickier . --format",
     "format:fix": "bunx --bun pickier . --format --write"
   },
+  "dependencies": {
+    "ts-png": "link:ts-png"
+  },
   "devDependencies": {
+    "@types/bun": "latest",
     "better-dx": "^0.2.7"
   },
   "git-hooks": {
