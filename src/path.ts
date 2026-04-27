@@ -339,55 +339,73 @@ export function flattenQuadratic(
 }
 
 /**
- * Flatten a sequence of path commands into a list of contours, where each
- * contour is a flat polyline `[x0, y0, x1, y1, ...]`. Cubics, quadratics
- * and arcs are tessellated to `tolerance` pixels.
+ * A flattened sub-path: the polyline points plus whether the original
+ * sub-path ended in `Z` (closepath).
  */
-export function flattenCommands(cmds: PathCmd[], tolerance = 0.25): number[][] {
-  const contours: number[][] = []
-  let current: number[] | null = null
+export interface FlatContour {
+  points: number[]
+  closed: boolean
+}
+
+/**
+ * Flatten a sequence of path commands into a list of contours. Cubics,
+ * quadratics and arcs are tessellated to `tolerance` pixels.
+ *
+ * Each contour records its `closed` flag so the stroke pass can choose
+ * caps for open paths and joins-around for closed paths. This matters
+ * for SVGs like `M … Z L …` where a draw command follows a closepath
+ * — it opens a new sub-path anchored at the previous start, but the
+ * new sub-path is open (no implicit closure).
+ */
+export function flattenCommands(cmds: PathCmd[], tolerance = 0.25): FlatContour[] {
+  const contours: FlatContour[] = []
+  let current: FlatContour | null = null
   let cx = 0, cy = 0
   let startX = 0, startY = 0
   for (const c of cmds) {
     switch (c.t) {
       case 'M':
-        current = [c.x, c.y]
+        current = { points: [c.x, c.y], closed: false }
         contours.push(current)
         cx = c.x; cy = c.y
         startX = c.x; startY = c.y
         break
       case 'L':
         if (!current) break
-        current.push(c.x, c.y)
+        current.points.push(c.x, c.y)
         cx = c.x; cy = c.y
         break
       case 'C':
         if (!current) break
-        flattenCubic(cx, cy, c.x1, c.y1, c.x2, c.y2, c.x, c.y, tolerance, current)
+        flattenCubic(cx, cy, c.x1, c.y1, c.x2, c.y2, c.x, c.y, tolerance, current.points)
         cx = c.x; cy = c.y
         break
       case 'Q':
         if (!current) break
-        flattenQuadratic(cx, cy, c.x1, c.y1, c.x, c.y, tolerance, current)
+        flattenQuadratic(cx, cy, c.x1, c.y1, c.x, c.y, tolerance, current.points)
         cx = c.x; cy = c.y
         break
       case 'A': {
         if (!current) break
         const cubics = arcToCubics(cx, cy, c.rx, c.ry, c.xAxisRot, c.largeArc, c.sweep, c.x, c.y)
         for (const cu of cubics) {
-          flattenCubic(cx, cy, cu.c1x, cu.c1y, cu.c2x, cu.c2y, cu.x, cu.y, tolerance, current)
+          flattenCubic(cx, cy, cu.c1x, cu.c1y, cu.c2x, cu.c2y, cu.x, cu.y, tolerance, current.points)
           cx = cu.x; cy = cu.y
         }
         break
       }
       case 'Z':
         if (current) {
-          current.push(startX, startY)
+          current.points.push(startX, startY)
+          current.closed = true
         }
         cx = startX; cy = startY
-        current = null
+        // Open a new contour anchored at the subpath start so any draw
+        // commands following Z (without an explicit M) still render.
+        current = { points: [startX, startY], closed: false }
+        contours.push(current)
         break
     }
   }
-  return contours.filter(c => c.length >= 4)
+  return contours.filter(c => c.points.length >= 4)
 }

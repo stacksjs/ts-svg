@@ -90,12 +90,15 @@ function hslToRgb(h: number, s: number, l: number): [number, number, number] {
  * Parse a CSS / SVG colour string into an RGBA. Returns transparent black on
  * failure. If `currentColor` is supplied, it overrides the resolution of the
  * `currentColor` keyword (which would otherwise default to black).
+ *
+ * Always returns a fresh object — callers may mutate the result (e.g. apply
+ * stop-opacity) without affecting `BLACK` / `TRANSPARENT` / shared constants.
  */
 export function parseColor(input: string | null | undefined, currentColor?: RGBA): RGBA {
-  if (input == null) return TRANSPARENT
+  if (input == null) return { ...TRANSPARENT }
   const s = input.trim().toLowerCase()
-  if (s === 'none' || s === 'transparent') return TRANSPARENT
-  if (s === 'currentcolor') return currentColor ?? BLACK
+  if (s === 'none' || s === 'transparent') return { ...TRANSPARENT }
+  if (s === 'currentcolor') return { ...(currentColor ?? BLACK) }
 
   if (s.startsWith('#')) {
     const hex = s.slice(1)
@@ -152,5 +155,5 @@ export function parseColor(input: string | null | undefined, currentColor?: RGBA
     return { r, g, b, a: 255 }
   }
 
-  return TRANSPARENT
+  return { ...TRANSPARENT }
 }

@@ -39,11 +39,42 @@ interface RenderCtx {
   defs: SVGDefs
   currentColor: RGBA
   maxUseDepth: number
+  /** Outermost SVG root — used to skip the "nested SVG" transform on it. */
+  rootNode: SVGRoot
+}
+
+/**
+ * Compute the inner-viewport transform for a nested `<svg>` element: maps
+ * the inner viewBox onto the (x, y, width, height) viewport defined by the
+ * inner <svg>'s `x`/`y`/`width`/`height` attributes (defaulting to 0/0/auto/auto),
+ * honouring its `preserveAspectRatio`.
+ */
+function nestedSvgTransform(node: SVGRoot): Matrix {
+  const vb = node.viewBox
+  if (!vb) return IDENTITY
+  // Nested <svg> doesn't carry its own x/y in our parsed type yet; treat as 0.
+  const vpW = node.width || vb.width
+  const vpH = node.height || vb.height
+  const sxRaw = vpW / vb.width
+  const syRaw = vpH / vb.height
+  const par = node.preserveAspectRatio
+  if (par.align === 'none') {
+    return [sxRaw, 0, 0, syRaw, -vb.x * sxRaw, -vb.y * syRaw]
+  }
+  const scaleU = par.meetOrSlice === 'slice' ? Math.max(sxRaw, syRaw) : Math.min(sxRaw, syRaw)
+  const slackX = vpW - vb.width * scaleU
+  const slackY = vpH - vb.height * scaleU
+  const xAlign = par.align.startsWith('xMin') ? 0 : par.align.startsWith('xMax') ? 1 : 0.5
+  const yAlign = par.align.includes('YMin') ? 0 : par.align.includes('YMax') ? 1 : 0.5
+  return [scaleU, 0, 0, scaleU, slackX * xAlign - vb.x * scaleU, slackY * yAlign - vb.y * scaleU]
 }
 
 interface InheritedStyle {
   fill: RGBA | null
   stroke: RGBA | null
+  /** Original fill string (e.g. `"url(#g)"`) — needed so paint-server refs cascade. */
+  fillRef?: string | null
+  strokeRef?: string | null
   strokeWidth: number
   strokeLineCap: StrokeStyle['cap']
   strokeLineJoin: StrokeStyle['join']
@@ -67,10 +98,16 @@ function inheritStyle(parent: InheritedStyle, node: BaseNode): InheritedStyle {
   // Thread `color` (cascaded) so `currentColor` references resolve correctly.
   const colorAttr = node.attrs?.color
   if (colorAttr) out.currentColor = parseColor(colorAttr, parent.currentColor)
-  if (node.fill === null) out.fill = null
-  else if (node.fill !== undefined) out.fill = parseColor(node.fill, out.currentColor)
-  if (node.stroke === null) out.stroke = null
-  else if (node.stroke !== undefined) out.stroke = parseColor(node.stroke, out.currentColor)
+  if (node.fill === null) { out.fill = null; out.fillRef = null }
+  else if (node.fill !== undefined) {
+    out.fill = parseColor(node.fill, out.currentColor)
+    out.fillRef = node.fill
+  }
+  if (node.stroke === null) { out.stroke = null; out.strokeRef = null }
+  else if (node.stroke !== undefined) {
+    out.stroke = parseColor(node.stroke, out.currentColor)
+    out.strokeRef = node.stroke
+  }
   if (node.strokeWidth != null) out.strokeWidth = node.strokeWidth
   if (node.strokeLineCap) out.strokeLineCap = node.strokeLineCap
   if (node.strokeLineJoin) out.strokeLineJoin = node.strokeLineJoin
@@ -181,6 +218,11 @@ function polygonToPolys(p: SVGPolygon): number[][] {
 
 function pathToPolys(p: SVGPath, tolerance: number): number[][] {
   const cmds = parsePath(p.d)
+  return flattenCommands(cmds, tolerance).map(c => c.points)
+}
+
+function pathToPolylines(p: SVGPath, tolerance: number): Array<{ points: number[], closed: boolean }> {
+  const cmds = parsePath(p.d)
   return flattenCommands(cmds, tolerance)
 }
 
@@ -195,7 +237,7 @@ function textToPolys(node: SVGText, tolerance: number, resolver: FontResolver | 
   // is the Y attribute, which matches ts-fonts' getPath baseline directly.
   const path = font.getPath(node.text, node.x + offset, node.y, node.fontSize)
   const cmds = parsePath(path.toPathData(3))
-  return flattenCommands(cmds, tolerance)
+  return flattenCommands(cmds, tolerance).map(c => c.points)
 }
 
 function shapeToPolys(node: SVGElementNode, tolerance: number, resolver: FontResolver | undefined): number[][] {
@@ -235,6 +277,44 @@ function compositeOver(dest: Framebuffer, src: Framebuffer): void {
     dest.data[i + 1] = Math.round((src.data[i + 1]! * sa + dest.data[i + 1]! * da * (1 - sa)) / oa)
     dest.data[i + 2] = Math.round((src.data[i + 2]! * sa + dest.data[i + 2]! * da * (1 - sa)) / oa)
     dest.data[i + 3] = Math.round(oa * 255)
+  }
+}
+
+/**
+ * Zero the alpha of every pixel outside the user-space rect (x, y, w, h)
+ * after transforming by `userToDev`. Used to honour `<mask x= y= width= height=>`.
+ */
+function clipFramebufferToRect(fb: Framebuffer, userToDev: Matrix, x: number, y: number, w: number, h: number): void {
+  // Map the rect's four corners and take the axis-aligned device-space bbox.
+  const corners: Array<[number, number]> = [
+    [x, y],
+    [x + w, y],
+    [x + w, y + h],
+    [x, y + h],
+  ]
+  let xMin = Infinity, yMin = Infinity, xMax = -Infinity, yMax = -Infinity
+  for (const [cx, cy] of corners) {
+    const dx = userToDev[0] * cx + userToDev[2] * cy + userToDev[4]
+    const dy = userToDev[1] * cx + userToDev[3] * cy + userToDev[5]
+    if (dx < xMin) xMin = dx
+    if (dy < yMin) yMin = dy
+    if (dx > xMax) xMax = dx
+    if (dy > yMax) yMax = dy
+  }
+  const xL = Math.max(0, Math.floor(xMin))
+  const yL = Math.max(0, Math.floor(yMin))
+  const xR = Math.min(fb.width, Math.ceil(xMax))
+  const yR = Math.min(fb.height, Math.ceil(yMax))
+  for (let py = 0; py < fb.height; py++) {
+    if (py >= yL && py < yR) {
+      // Zero alpha outside [xL, xR) on this row.
+      for (let px = 0; px < xL; px++) fb.data[(py * fb.width + px) * 4 + 3] = 0
+      for (let px = xR; px < fb.width; px++) fb.data[(py * fb.width + px) * 4 + 3] = 0
+    }
+    else {
+      // Entire row is outside the region.
+      for (let px = 0; px < fb.width; px++) fb.data[(py * fb.width + px) * 4 + 3] = 0
+    }
   }
 }
 
@@ -306,15 +386,29 @@ function renderNode(node: SVGNode, parentStyle: InheritedStyle, ctx: RenderCtx):
   }
 
   if (node.tag === 'svg' || node.tag === 'g') {
-    // If this group has a clip-path or mask, render its children into an
-    // offscreen layer, apply the mask, then composite back.
-    const clipId = parseUrlRef(style.clipPath ?? null)
-    const maskId = parseUrlRef((style as InheritedStyle & { mask?: string }).mask ?? null)
-    if (clipId || maskId) {
-      renderLayer(node, style, ctx, clipId, maskId)
+    // Nested <svg>: apply its own viewBox + preserveAspectRatio as an extra
+    // transform layered on top of the parent's so its children render in the
+    // inner viewport's coordinate system. (For the root svg, this is already
+    // baked into ctx.rootTransform.)
+    let nodeStyle = style
+    if (node.tag === 'svg' && (node as SVGRoot).viewBox && node !== ctx.rootNode) {
+      const t = nestedSvgTransform(node as SVGRoot)
+      nodeStyle = { ...style, transform: multiply(style.transform, t) }
+    }
+
+    // Group `opacity` per spec composites the WHOLE group then applies alpha,
+    // not per-child. We detect a group-level opacity ratio by comparing the
+    // post-cascade `opacity` to the pre-cascade parent's, and if a node sets
+    // its own opacity (anything other than 1) we route through renderLayer.
+    // Same for clip-path / mask.
+    const clipId = parseUrlRef(nodeStyle.clipPath ?? null)
+    const maskId = parseUrlRef(nodeStyle.mask ?? null)
+    const ownOpacity = node.opacity != null && node.opacity < 1
+    if (clipId || maskId || ownOpacity) {
+      renderLayer(node, nodeStyle, ctx, clipId, maskId, ownOpacity ? node.opacity! : 1)
       return
     }
-    for (const c of node.children) renderNode(c, style, ctx)
+    for (const c of node.children) renderNode(c, nodeStyle, ctx)
     return
   }
 
@@ -332,38 +426,57 @@ function renderNode(node: SVGNode, parentStyle: InheritedStyle, ctx: RenderCtx):
 /** Draw a single shape element with current style + paints. */
 function drawShape(node: SVGNode, style: InheritedStyle, ctx: RenderCtx): void {
   if (node.tag === 'svg' || node.tag === 'g' || node.tag === 'use') return
+  // Compute the user-space polygon set ONCE — both the fill and stroke passes
+  // (and the stroke's bbox lookup for paint-server resolution) need it.
   const userPolys = shapeToPolys(node as SVGElementNode, ctx.tolerance, ctx.fontResolver)
   const finalT = multiply(ctx.rootTransform, style.transform)
+  // Bounding box also computed once — used by both fill and stroke paint resolvers.
+  const bbox = userPolys.length > 0 ? polysBBox(userPolys) : { x: 0, y: 0, width: 0, height: 0 }
+
+  // Inheritable paint refs come from the cascade rather than the node's own
+  // attribute, so a child without its own `fill=` still picks up an ancestor's
+  // `fill="url(#g)"` paint server.
+  const fillRef = style.fillRef
+  const strokeRef = style.strokeRef
+
   if (userPolys.length > 0) {
     const devPolys = userPolys.map(p => transformPoly(p, finalT))
-    const bbox = polysBBox(userPolys)
     const fillBase = effectiveFill(style)
-    const fillRef = (node as BaseNode).fill
     const fillPaint = resolvePaint(fillRef, fillBase, ctx.defs, bbox, finalT)
     if (fillPaint) fillPolygons(ctx.fb, devPolys, fillPaint)
   }
 
   const strokeSpec = effectiveStroke(style)
-  const strokeRef = (node as BaseNode).stroke
   if (strokeSpec || strokeRef) {
-    const lp = shapeToPolylines(node as SVGElementNode, ctx.tolerance, ctx.fontResolver)
-    if (lp.polys.length > 0) {
-      const devPolys = lp.polys.map(p => transformPoly(p, finalT))
-      const sx = Math.hypot(finalT[0], finalT[1])
-      const sy = Math.hypot(finalT[2], finalT[3])
-      const scale = (sx + sy) / 2 || 1
-      const strokeStyle: StrokeStyle = {
-        width: (strokeSpec?.width ?? style.strokeWidth) * scale,
-        cap: style.strokeLineCap,
-        join: style.strokeLineJoin,
-        miterLimit: style.strokeMiterLimit,
-        dashArray: style.strokeDashArray.map(d => d * scale),
-        dashOffset: style.strokeDashOffset * scale,
+    const sx = Math.hypot(finalT[0], finalT[1])
+    const sy = Math.hypot(finalT[2], finalT[3])
+    const scale = (sx + sy) / 2 || 1
+    const strokeStyle: StrokeStyle = {
+      width: (strokeSpec?.width ?? style.strokeWidth) * scale,
+      cap: style.strokeLineCap,
+      join: style.strokeLineJoin,
+      miterLimit: style.strokeMiterLimit,
+      dashArray: style.strokeDashArray.map(d => d * scale),
+      dashOffset: style.strokeDashOffset * scale,
+    }
+    const baseStroke = strokeSpec?.color ?? null
+    const strokePaint = resolvePaint(strokeRef, baseStroke, ctx.defs, bbox, finalT)
+    if (strokePaint) {
+      // For <path> we honour each sub-path's own open/closed flag so an
+      // unclosed sub-path strokes with caps and a closed one joins-around.
+      if (node.tag === 'path') {
+        for (const sp of pathToPolylines(node as SVGPath, ctx.tolerance)) {
+          const dev = transformPoly(sp.points, finalT)
+          strokePolylines(ctx.fb, [dev], strokePaint, strokeStyle, sp.closed)
+        }
       }
-      const bbox = polysBBox(shapeToPolys(node as SVGElementNode, ctx.tolerance, ctx.fontResolver))
-      const baseStroke = strokeSpec?.color ?? null
-      const strokePaint = resolvePaint(strokeRef, baseStroke, ctx.defs, bbox, finalT)
-      if (strokePaint) strokePolylines(ctx.fb, devPolys, strokePaint, strokeStyle, lp.closed)
+      else {
+        const lp = shapeToPolylines(node as SVGElementNode, ctx.tolerance, ctx.fontResolver)
+        if (lp.polys.length > 0) {
+          const devPolys = lp.polys.map(p => transformPoly(p, finalT))
+          strokePolylines(ctx.fb, devPolys, strokePaint, strokeStyle, lp.closed)
+        }
+      }
     }
   }
 }
@@ -398,12 +511,13 @@ function nodeUserBBox(node: SVGNode, tolerance: number, resolver: FontResolver |
  * `objectBoundingBox`, the clip/mask coordinate system is the unit square
  * mapped onto the target element's user-space bbox.
  */
-function renderLayer(node: SVGNode, style: InheritedStyle, ctx: RenderCtx, clipId: string | null, maskId: string | null): void {
+function renderLayer(node: SVGNode, style: InheritedStyle, ctx: RenderCtx, clipId: string | null, maskId: string | null, layerOpacity = 1): void {
   const offscreen = createFramebuffer(ctx.fb.width, ctx.fb.height, { r: 0, g: 0, b: 0, a: 0 })
   const layerCtx: RenderCtx = { ...ctx, fb: offscreen }
   // Strip clip-path/mask from the inner style so the recursive draw doesn't
-  // re-enter renderLayer ad infinitum.
-  const innerStyle: InheritedStyle = { ...style, clipPath: undefined, mask: undefined }
+  // re-enter renderLayer ad infinitum. Reset opacity to 1 — the layer itself
+  // will be alpha-modulated by `layerOpacity` after compositing.
+  const innerStyle: InheritedStyle = { ...style, clipPath: undefined, mask: undefined, opacity: 1 }
 
   if (node.tag === 'svg' || node.tag === 'g') {
     for (const c of node.children) renderNode(c, innerStyle, layerCtx)
@@ -449,8 +563,36 @@ function renderLayer(node: SVGNode, style: InheritedStyle, ctx: RenderCtx, clipI
         maskStyle = { ...innerStyle, transform: multiply(innerStyle.transform, t) }
       }
       for (const c of mask.children) renderNode(c, maskStyle, maskCtx)
+      // Apply the mask region (x/y/width/height) by zeroing alpha outside it.
+      // SVG default region in objectBoundingBox is (-10%,-10%,120%,120%) of the
+      // target bbox; in userSpaceOnUse the entire viewport — both already
+      // covered by the full-viewport mask buffer, so we only need to clip when
+      // the author has supplied explicit values that would constrain it.
+      if (mask.x != null || mask.y != null || mask.width != null || mask.height != null) {
+        const mx = mask.x ?? 0
+        const my = mask.y ?? 0
+        const mw = mask.width ?? Infinity
+        const mh = mask.height ?? Infinity
+        // Region in mask units. For objectBoundingBox, the bbox transform is
+        // already applied via finalT below; for userSpaceOnUse, transform via
+        // rootTransform.
+        let regionT: Matrix = ctx.rootTransform
+        if (mask.units === 'objectBoundingBox') {
+          const bb = ensureBBox()
+          regionT = multiply(ctx.rootTransform, [bb.width, 0, 0, bb.height, bb.x, bb.y])
+        }
+        clipFramebufferToRect(maskFb, regionT, mx, my, mw, mh)
+      }
       if (mask.maskType === 'alpha') multiplyAlpha(offscreen, maskFb)
       else multiplyLuminance(offscreen, maskFb)
+    }
+  }
+
+  // Apply layer-level opacity (group `opacity` per spec) by scaling alpha.
+  if (layerOpacity < 1) {
+    const k = Math.max(0, Math.min(1, layerOpacity))
+    for (let i = 3; i < offscreen.data.length; i += 4) {
+      offscreen.data[i] = Math.round(offscreen.data[i]! * k)
     }
   }
 
@@ -518,6 +660,7 @@ export function rasterize(root: SVGRoot, opts: RenderOptions = {}): Framebuffer 
     defs: root.defs,
     currentColor,
     maxUseDepth: opts.maxUseDepth ?? config.maxUseDepth,
+    rootNode: root,
   }
 
   // Initial style: SVG defaults — fill=black, stroke=none, stroke-width=1.

@@ -2,14 +2,24 @@
  * Lightweight, allocation-friendly SVG/XML parser.
  *
  * Produces a typed `SVGRoot` element tree from an SVG source string.
- * Scope:
- *   - elements: svg, g, defs, rect, circle, ellipse, line, polygon, polyline, path, title, desc
- *   - attributes: numeric coords, viewBox, transform, fill, stroke, stroke-width, opacity
- *   - inline `style="fill: red; stroke-width: 2"` is normalised onto top-level attrs
  *
- * Out of scope (intentionally — keeps the parser tiny):
- *   - DTDs, entities beyond the five XML defaults, CDATA, processing instructions
- *   - external stylesheets, <use>, <symbol>, <pattern>, <filter>, <mask>
+ * Supported elements:
+ *   svg, g, a, defs, symbol, rect, circle, ellipse, line, polygon, polyline,
+ *   path, text, use, linearGradient, radialGradient, stop, clipPath, mask
+ *
+ * Supported attributes / features:
+ *   - numeric coords, viewBox, preserveAspectRatio, transform
+ *   - fill, stroke, stroke-width, stroke-linecap/linejoin/miterlimit/dasharray/dashoffset
+ *   - opacity, fill-opacity, stroke-opacity
+ *   - clip-path, mask (with `objectBoundingBox` units), `mask-type`
+ *   - inline `style="…"` declarations are projected onto a per-element view
+ *     (without mutating the source attrs map)
+ *   - gradient `xlink:href` chaining (stops + geometry inheritance)
+ *
+ * Out of scope (today):
+ *   - DTDs / external stylesheets / `<style>` CSS selectors
+ *   - `<filter>`, `<pattern>`, `<image>`, `<tspan>` per-glyph positioning
+ *   - processing instructions other than `<?xml…?>`
  *
  * The renderer treats unknown elements as transparent groups (their
  * children render with inherited style).
@@ -35,11 +45,11 @@ function parsePreserveAspectRatio(s: string | undefined): PreserveAspectRatio {
   return { align, meetOrSlice }
 }
 
-type RawNode = RawElement | { tag: '#text', text: string }
+interface RawTextNode { tag: '#text', text: string }
 interface RawElement {
   tag: string
   attrs: Record<string, string>
-  children: RawNode[]
+  children: Array<RawElement | RawTextNode>
 }
 
 function collectText(el: RawElement): string {
@@ -151,6 +161,19 @@ function parseNumber(v: string | undefined, fallback = 0): number {
   return Number.isFinite(n) ? n : fallback
 }
 
+/**
+ * Resolve a length-or-percentage value. Recognised unit suffixes:
+ *   - `%`      → fraction of `base`
+ *   - `px`     → pixels (1:1 with user units)
+ *   - `pt`/`pc`/`in`/`cm`/`mm`/`Q` → physical length, converted to px at 96dpi
+ *   - `em`/`rem`/`ex`/`ch` → treated as multiples of 16 (no font cascade yet)
+ *   - bare number → user units
+ *
+ * `parseFloat` would silently strip ANY suffix and return the leading
+ * number — that's correct for `px` but produced wrong results for `em`/`pt`
+ * ("12em" used to render as 12 user units). The unit table below makes the
+ * conversion explicit so the renderer matches expected sizing.
+ */
 function parseLengthPercent(v: string | undefined, base: number, fallback = 0): number {
   if (v == null) return fallback
   const t = v.trim()
@@ -159,7 +182,27 @@ function parseLengthPercent(v: string | undefined, base: number, fallback = 0): 
     return Number.isFinite(n) ? (n / 100) * base : fallback
   }
   const n = Number.parseFloat(t)
-  return Number.isFinite(n) ? n : fallback
+  if (!Number.isFinite(n)) return fallback
+  // Strip the leading number to inspect any unit suffix.
+  const unit = t.slice(String(n).length).trim().toLowerCase()
+  switch (unit) {
+    case '':
+    case 'px':
+      return n
+    case 'pt': return n * (96 / 72)
+    case 'pc': return n * (96 / 6)
+    case 'in': return n * 96
+    case 'cm': return n * (96 / 2.54)
+    case 'mm': return n * (96 / 25.4)
+    case 'q': return n * (96 / 101.6)
+    case 'em':
+    case 'rem':
+    case 'ex':
+    case 'ch':
+      return n * 16 // crude — no font-size cascade yet
+    default:
+      return n
+  }
 }
 
 function parsePoints(v: string): Array<[number, number]> {
@@ -285,8 +328,10 @@ function buildNode(raw: RawElement, vbWidth: number, vbHeight: number): SVGNode 
       const vb = attrs.viewBox
         ? (() => {
             const nums = attrs.viewBox.split(/[\s,]+/).filter(Boolean).map(Number)
-            if (nums.length === 4) return { x: nums[0]!, y: nums[1]!, width: nums[2]!, height: nums[3]! }
-            return undefined
+            if (nums.length !== 4) return undefined
+            // Per spec, negative width/height makes the viewBox invalid; ignore.
+            if (!nums.every(Number.isFinite) || nums[2]! < 0 || nums[3]! < 0) return undefined
+            return { x: nums[0]!, y: nums[1]!, width: nums[2]!, height: nums[3]! }
           })()
         : undefined
       const width = parseLengthPercent(attrs.width, vb?.width ?? vbWidth, vb?.width ?? vbWidth)
@@ -441,9 +486,26 @@ function parseGradientStop(raw: RawElement): SVGGradientStop {
   if (raw.attrs['stop-opacity']) stopOpacity = Number.parseFloat(raw.attrs['stop-opacity']!)
   const color = parseColor(stopColor ?? 'black')
   if (stopOpacity != null && Number.isFinite(stopOpacity)) {
-    color.a = Math.round(color.a * stopOpacity)
+    // Clamp stopOpacity to [0,1] before scaling so values like "1.5" don't push alpha past 255.
+    const op = Math.max(0, Math.min(1, stopOpacity))
+    color.a = Math.max(0, Math.min(255, Math.round(color.a * op)))
   }
   return { offset, color }
+}
+
+/**
+ * Order gradient stops by offset and clamp each offset to be ≥ the previous
+ * one. Per SVG spec, out-of-order offsets are coerced into monotonic order
+ * (so a stop with offset 0.4 after a stop with offset 0.7 becomes 0.7).
+ */
+function normaliseGradientStops(stops: SVGGradientStop[]): SVGGradientStop[] {
+  const sorted = stops.slice().sort((a, b) => a.offset - b.offset)
+  let lastOffset = 0
+  for (const s of sorted) {
+    if (s.offset < lastOffset) s.offset = lastOffset
+    else lastOffset = s.offset
+  }
+  return sorted
 }
 
 /**
@@ -469,9 +531,11 @@ function parseGradient(raw: RawElement): RawGradient | null {
   const spreadRaw = raw.attrs.spreadMethod
   const spreadMethod = spreadRaw === 'reflect' || spreadRaw === 'repeat' ? spreadRaw : 'pad'
   const transform = raw.attrs.gradientTransform ? parseTransform(raw.attrs.gradientTransform) : undefined
-  const stops: SVGGradientStop[] = raw.children
-    .filter((c): c is RawElement => c.tag === 'stop')
-    .map(parseGradientStop)
+  const stops: SVGGradientStop[] = normaliseGradientStops(
+    raw.children
+      .filter((c): c is RawElement => c.tag === 'stop')
+      .map(parseGradientStop),
+  )
   const hrefRaw = raw.attrs.href ?? raw.attrs['xlink:href']
   const href = hrefRaw && hrefRaw.startsWith('#') ? hrefRaw.slice(1) : null
 
@@ -675,9 +739,15 @@ function collectDefs(raw: RawElement, vbW: number, vbH: number): SVGDefs {
  * Throws if the input doesn't contain a top-level `<svg>` element.
  */
 export function parseSVG(svg: string): SVGRoot {
+  if (typeof svg !== 'string' || svg.trim().length === 0) {
+    throw new TypeError('parseSVG: expected a non-empty SVG source string')
+  }
   const raw = parseRaw(svg)
-  if (!raw || raw.tag !== 'svg') {
-    throw new Error('parseSVG: input did not contain a top-level <svg> element')
+  if (!raw) {
+    throw new Error('parseSVG: input did not contain any XML element')
+  }
+  if (raw.tag !== 'svg') {
+    throw new Error(`parseSVG: top-level element must be <svg>, got <${raw.tag}>`)
   }
   // Initial fallback dims (before we know viewBox/width); the SVG node
   // resolves its own from attributes.
