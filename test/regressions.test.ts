@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test'
-import png from 'ts-png'
+import png from '@stacksjs/ts-png'
 import { BLACK, parseColor, parsePath, parseSVG, Resvg, TRANSPARENT } from '../src'
 
 interface Pixel { r: number, g: number, b: number, a: number }
