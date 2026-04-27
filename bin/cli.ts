@@ -6,7 +6,7 @@ import { CLI } from '@stacksjs/clapp'
 import { version } from '../package.json'
 import { Resvg, svgToPng } from '../src'
 
-const cli = new CLI('ts-svg')
+const cli = new CLI('svg')
 
 interface RenderOpts {
   out?: string
@@ -24,7 +24,7 @@ function readSvg(input: string | undefined, useStdin: boolean | undefined): { sv
     const buf = readFileSync(0)
     const svg = buf.toString('utf8')
     if (!svg.trim()) {
-      console.error('ts-svg: stdin was empty (pipe an SVG document to render)')
+      console.error('svg: stdin was empty (pipe an SVG document to render)')
       process.exit(2)
     }
     return { svg, source: '<stdin>' }
@@ -33,7 +33,7 @@ function readSvg(input: string | undefined, useStdin: boolean | undefined): { sv
     return { svg: readFileSync(resolve(input), 'utf8'), source: resolve(input) }
   }
   catch (err) {
-    console.error(`ts-svg: cannot read ${input}: ${(err as Error).message}`)
+    console.error(`svg: cannot read ${input}: ${(err as Error).message}`)
     process.exit(2)
   }
 }
@@ -41,7 +41,7 @@ function readSvg(input: string | undefined, useStdin: boolean | undefined): { sv
 function deriveOut(input: string | undefined, override: string | undefined, useStdin: boolean | undefined): string {
   if (override) return resolve(override)
   if (useStdin || input == null || input === '-') {
-    console.error('ts-svg: --out is required when reading from stdin')
+    console.error('svg: --out is required when reading from stdin')
     process.exit(2)
   }
   const inPath = resolve(input)
@@ -57,8 +57,8 @@ cli
   .option('-b, --background <color>', 'Background colour (e.g. "#fff" or "transparent")')
   .option('-t, --tolerance <px>', 'Bezier flattening tolerance', { default: 0.25 })
   .option('--stdin', 'Read SVG from stdin (overrides positional input)')
-  .example('ts-svg render logo.svg -o logo.png --scale 2')
-  .example('cat logo.svg | ts-svg render --stdin -o logo.png')
+  .example('svg render logo.svg -o logo.png --scale 2')
+  .example('cat logo.svg | svg render --stdin -o logo.png')
   .action((input: string | undefined, options: RenderOpts) => {
     const { svg, source } = readSvg(input, options.stdin)
     const outPath = deriveOut(input, options.out, options.stdin)
@@ -77,7 +77,7 @@ cli
       console.log(`wrote ${outPath} (${png.byteLength} bytes from ${source})`)
     }
     catch (err) {
-      console.error(`ts-svg: render failed (${source}): ${(err as Error).message}`)
+      console.error(`svg: render failed (${source}): ${(err as Error).message}`)
       process.exit(1)
     }
   })
@@ -96,7 +96,7 @@ cli
       console.log(`wrote ${outPath} (${png.byteLength} bytes from ${source})`)
     }
     catch (err) {
-      console.error(`ts-svg: render failed (${source}): ${(err as Error).message}`)
+      console.error(`svg: render failed (${source}): ${(err as Error).message}`)
       process.exit(1)
     }
   })
