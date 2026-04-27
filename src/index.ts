@@ -12,18 +12,29 @@
 export * from './config'
 export type {
   BaseNode,
+  FontResolver,
   Matrix,
+  ResolvedFont,
   RGBA,
   SVGCircle,
+  SVGClipPath,
+  SVGDefs,
   SVGElementNode,
   SVGEllipse,
+  SVGGradient,
+  SVGGradientStop,
   SVGGroup,
   SVGLine,
+  SVGLinearGradient,
+  SVGMask,
   SVGNode,
   SVGPath,
   SVGPolygon,
+  SVGRadialGradient,
   SVGRect,
   SVGRoot,
+  SVGText,
+  SVGUse,
 } from './types'
 
 export { parseSVG } from './parser'
@@ -33,7 +44,7 @@ export type { Framebuffer, RenderOptions } from './render'
 export { rasterize } from './render'
 export { createFramebuffer, fillPolygons, strokePolylines } from './raster'
 export { encodePng } from './png'
-export { applyMatrix, IDENTITY, multiply, parseTransform } from './transform'
+export { applyMatrix, IDENTITY, invertMatrix, multiply, parseTransform } from './transform'
 export { BLACK, parseColor, TRANSPARENT, WHITE } from './color'
 export type { ResvgFitTo, ResvgOptions } from './resvg'
 export { RenderedImage, Resvg } from './resvg'

@@ -53,7 +53,7 @@ function collectText(el: RawElement): string {
 }
 
 const SELF_CLOSING = new Set([
-  'rect', 'circle', 'ellipse', 'line', 'polygon', 'polyline', 'path', 'use', 'image', 'br',
+  'rect', 'circle', 'ellipse', 'line', 'polygon', 'polyline', 'path', 'use', 'image', 'stop',
 ])
 
 function decodeEntities(s: string): string {
@@ -86,9 +86,12 @@ function parseAttributes(s: string): Record<string, string> {
  */
 function parseRaw(svg: string): RawElement | null {
   // Strip XML decl, doctype, comments, CDATA — we don't render any of them.
-  let src = svg
+  // The doctype pattern handles internal subsets: `<!DOCTYPE foo [...]>` —
+  // match the optional `[...]` block separately so we don't terminate at the
+  // first `>` inside an entity declaration.
+  const src = svg
     .replace(/<\?xml[^?]*\?>/g, '')
-    .replace(/<!DOCTYPE[\s\S]*?>/g, '')
+    .replace(/<!DOCTYPE[^[>]*(?:\[[\s\S]*?\])?[^>]*>/g, '')
     .replace(/<!--[\s\S]*?-->/g, '')
     .replace(/<!\[CDATA\[[\s\S]*?\]\]>/g, '')
     .trim()
@@ -163,7 +166,8 @@ function parsePoints(v: string): Array<[number, number]> {
   const out: Array<[number, number]> = []
   const nums = v.split(/[\s,]+/).filter(Boolean).map(Number)
   for (let i = 0; i + 1 < nums.length; i += 2) {
-    out.push([nums[i]!, nums[i + 1]!])
+    const x = nums[i]!, y = nums[i + 1]!
+    if (Number.isFinite(x) && Number.isFinite(y)) out.push([x, y])
   }
   return out
 }
@@ -185,8 +189,11 @@ interface StyleAttrs {
   mask?: string
 }
 
-function pickStyle(attrs: Record<string, string>): StyleAttrs {
-  // Inline style attribute is "k: v; k: v"; merge it onto attrs.
+function pickStyle(rawAttrs: Record<string, string>): StyleAttrs {
+  // Inline style attribute is "k: v; k: v"; project it onto a local view
+  // without mutating the source attrs map (callers preserve `attrs` on the
+  // node and shouldn't see synthetic keys back-written from `style`).
+  const attrs: Record<string, string> = { ...rawAttrs }
   const style = attrs.style
   if (style) {
     for (const decl of style.split(';')) {
@@ -258,7 +265,6 @@ function buildNode(raw: RawElement, vbWidth: number, vbHeight: number): SVGNode 
 
   switch (raw.tag) {
     case 'g':
-    case 'defs':
     case 'a': {
       const group: SVGGroup = {
         tag: 'g',
@@ -270,6 +276,10 @@ function buildNode(raw: RawElement, vbWidth: number, vbHeight: number): SVGNode 
       }
       return group
     }
+    case 'defs':
+      // <defs> contents are invisible — they only render via <use href>.
+      // They are still walked by collectDefs() to populate the byId registry.
+      return null
     case 'svg': {
       // viewBox first so child %-lengths can resolve against it.
       const vb = attrs.viewBox
@@ -436,9 +446,25 @@ function parseGradientStop(raw: RawElement): SVGGradientStop {
   return { offset, color }
 }
 
-function parseGradient(raw: RawElement): SVGGradient | null {
+/**
+ * Intermediate gradient representation that records which fields were
+ * explicitly set on the source element. Required to implement
+ * `xlink:href` inheritance (resolveGradientHrefs) per SVG spec — fields
+ * that weren't set on the child inherit from the referenced parent.
+ */
+interface RawGradient {
+  gradient: SVGGradient
+  hasOwnStops: boolean
+  setKeys: Set<string>
+  href: string | null
+}
+
+function parseGradient(raw: RawElement): RawGradient | null {
   const id = raw.attrs.id
   if (!id) return null
+  const setKeys = new Set<string>()
+  for (const k of Object.keys(raw.attrs)) setKeys.add(k)
+
   const units = raw.attrs.gradientUnits === 'userSpaceOnUse' ? 'userSpaceOnUse' : 'objectBoundingBox'
   const spreadRaw = raw.attrs.spreadMethod
   const spreadMethod = spreadRaw === 'reflect' || spreadRaw === 'repeat' ? spreadRaw : 'pad'
@@ -446,31 +472,121 @@ function parseGradient(raw: RawElement): SVGGradient | null {
   const stops: SVGGradientStop[] = raw.children
     .filter((c): c is RawElement => c.tag === 'stop')
     .map(parseGradientStop)
+  const hrefRaw = raw.attrs.href ?? raw.attrs['xlink:href']
+  const href = hrefRaw && hrefRaw.startsWith('#') ? hrefRaw.slice(1) : null
 
   if (raw.tag === 'linearGradient') {
-    const x1 = parseLengthPercent(raw.attrs.x1, 1, 0)
-    const y1 = parseLengthPercent(raw.attrs.y1, 1, 0)
-    const x2 = parseLengthPercent(raw.attrs.x2, 1, 1)
-    const y2 = parseLengthPercent(raw.attrs.y2, 1, 0)
     const grad: SVGLinearGradient = {
-      tag: 'linearGradient', id, x1, y1, x2, y2, units, spreadMethod, stops,
-      gradientTransform: transform, attrs: raw.attrs,
+      tag: 'linearGradient',
+      id,
+      x1: parseLengthPercent(raw.attrs.x1, 1, 0),
+      y1: parseLengthPercent(raw.attrs.y1, 1, 0),
+      x2: parseLengthPercent(raw.attrs.x2, 1, 1),
+      y2: parseLengthPercent(raw.attrs.y2, 1, 0),
+      units,
+      spreadMethod,
+      stops,
+      gradientTransform: transform,
+      attrs: raw.attrs,
     }
-    return grad
+    return { gradient: grad, hasOwnStops: stops.length > 0, setKeys, href }
   }
   if (raw.tag === 'radialGradient') {
     const cx = parseLengthPercent(raw.attrs.cx, 1, 0.5)
     const cy = parseLengthPercent(raw.attrs.cy, 1, 0.5)
-    const r = parseLengthPercent(raw.attrs.r, 1, 0.5)
-    const fx = raw.attrs.fx != null ? parseLengthPercent(raw.attrs.fx, 1, cx) : cx
-    const fy = raw.attrs.fy != null ? parseLengthPercent(raw.attrs.fy, 1, cy) : cy
     const grad: SVGRadialGradient = {
-      tag: 'radialGradient', id, cx, cy, r, fx, fy, units, spreadMethod, stops,
-      gradientTransform: transform, attrs: raw.attrs,
+      tag: 'radialGradient',
+      id,
+      cx,
+      cy,
+      r: parseLengthPercent(raw.attrs.r, 1, 0.5),
+      fx: raw.attrs.fx != null ? parseLengthPercent(raw.attrs.fx, 1, cx) : cx,
+      fy: raw.attrs.fy != null ? parseLengthPercent(raw.attrs.fy, 1, cy) : cy,
+      units,
+      spreadMethod,
+      stops,
+      gradientTransform: transform,
+      attrs: raw.attrs,
     }
-    return grad
+    return { gradient: grad, hasOwnStops: stops.length > 0, setKeys, href }
   }
   return null
+}
+
+/**
+ * Resolve `xlink:href` chains: a gradient that links to another gradient
+ * inherits the parent's stops (if it has none of its own) and any
+ * geometry attribute (x1/y1/x2/y2 / cx/cy/r/fx/fy / units / spreadMethod /
+ * gradientTransform) that wasn't explicitly set on the child.
+ *
+ * Cycles are guarded with a visited set; a self-loop short-circuits.
+ */
+function resolveGradientHrefs(raws: Map<string, RawGradient>): Map<string, SVGGradient> {
+  const out = new Map<string, SVGGradient>()
+  const resolved = new Map<string, SVGGradient>()
+
+  const resolve = (id: string, seen: Set<string>): SVGGradient | null => {
+    const cached = resolved.get(id)
+    if (cached) return cached
+    if (seen.has(id)) return null
+    seen.add(id)
+    const r = raws.get(id)
+    if (!r) return null
+    if (!r.href) {
+      resolved.set(id, r.gradient)
+      return r.gradient
+    }
+    const parent = resolve(r.href, seen)
+    if (!parent || parent.tag !== r.gradient.tag) {
+      resolved.set(id, r.gradient)
+      return r.gradient
+    }
+    // Inherit fields not explicitly set on `r`.
+    const merged = inheritGradient(r, parent)
+    resolved.set(id, merged)
+    return merged
+  }
+
+  for (const id of raws.keys()) {
+    const g = resolve(id, new Set())
+    if (g) out.set(id, g)
+  }
+  return out
+}
+
+function inheritGradient(child: RawGradient, parent: SVGGradient): SVGGradient {
+  const c = child.gradient
+  const stops = child.hasOwnStops ? c.stops : parent.stops
+  const has = (k: string) => child.setKeys.has(k)
+  const baseFields = {
+    units: has('gradientUnits') ? c.units : parent.units,
+    spreadMethod: has('spreadMethod') ? c.spreadMethod : parent.spreadMethod,
+    gradientTransform: has('gradientTransform') ? c.gradientTransform : parent.gradientTransform,
+  }
+  if (c.tag === 'linearGradient' && parent.tag === 'linearGradient') {
+    return {
+      ...c,
+      ...baseFields,
+      x1: has('x1') ? c.x1 : parent.x1,
+      y1: has('y1') ? c.y1 : parent.y1,
+      x2: has('x2') ? c.x2 : parent.x2,
+      y2: has('y2') ? c.y2 : parent.y2,
+      stops,
+    }
+  }
+  if (c.tag === 'radialGradient' && parent.tag === 'radialGradient') {
+    return {
+      ...c,
+      ...baseFields,
+      cx: has('cx') ? c.cx : parent.cx,
+      cy: has('cy') ? c.cy : parent.cy,
+      r: has('r') ? c.r : parent.r,
+      fx: has('fx') ? c.fx : (has('cx') ? c.cx : parent.fx),
+      fy: has('fy') ? c.fy : (has('cy') ? c.cy : parent.fy),
+      stops,
+    }
+  }
+  return c
 }
 
 /**
@@ -485,10 +601,11 @@ function collectDefs(raw: RawElement, vbW: number, vbH: number): SVGDefs {
     masks: new Map(),
     byId: new Map(),
   }
+  const rawGradients = new Map<string, RawGradient>()
   const walk = (el: RawElement): void => {
     if (el.tag === 'linearGradient' || el.tag === 'radialGradient') {
       const g = parseGradient(el)
-      if (g) defs.gradients.set(g.id, g)
+      if (g) rawGradients.set(g.gradient.id, g)
     }
     else if (el.tag === 'clipPath') {
       const id = el.attrs.id
@@ -510,8 +627,9 @@ function collectDefs(raw: RawElement, vbW: number, vbH: number): SVGDefs {
       if (id) {
         const units = el.attrs.maskUnits === 'objectBoundingBox' ? 'objectBoundingBox' : 'userSpaceOnUse'
         const contentUnits = el.attrs.maskContentUnits === 'objectBoundingBox' ? 'objectBoundingBox' : 'userSpaceOnUse'
+        const maskType = el.attrs['mask-type'] === 'alpha' ? 'alpha' : 'luminance'
         const mk: SVGMask = {
-          tag: 'mask', id, units, contentUnits,
+          tag: 'mask', id, units, contentUnits, maskType,
           x: el.attrs.x != null ? parseLengthPercent(el.attrs.x, vbW, 0) : undefined,
           y: el.attrs.y != null ? parseLengthPercent(el.attrs.y, vbH, 0) : undefined,
           width: el.attrs.width != null ? parseLengthPercent(el.attrs.width, vbW, vbW) : undefined,
@@ -525,6 +643,18 @@ function collectDefs(raw: RawElement, vbW: number, vbH: number): SVGDefs {
         defs.masks.set(id, mk)
       }
     }
+    else if (el.tag === 'symbol' && el.attrs.id) {
+      // <symbol> renders only via <use href="#id"> — wrap children in a group.
+      const group: SVGGroup = {
+        tag: 'g',
+        attrs: el.attrs,
+        children: el.children
+          .filter((c): c is RawElement => c.tag !== '#text')
+          .map(c => buildNode(c, vbW, vbH))
+          .filter((c): c is SVGNode => c != null),
+      }
+      defs.byId.set(el.attrs.id, group)
+    }
     else if (el.attrs.id) {
       const node = buildNode(el, vbW, vbH)
       if (node) defs.byId.set(el.attrs.id, node)
@@ -534,6 +664,8 @@ function collectDefs(raw: RawElement, vbW: number, vbH: number): SVGDefs {
     }
   }
   walk(raw)
+  // Resolve `xlink:href` chains for gradients (stops + geometry inheritance).
+  for (const [id, g] of resolveGradientHrefs(rawGradients)) defs.gradients.set(id, g)
   return defs
 }
 

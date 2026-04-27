@@ -169,6 +169,8 @@ export interface SVGMask {
   units: 'userSpaceOnUse' | 'objectBoundingBox'
   /** maskContentUnits (default userSpaceOnUse). */
   contentUnits: 'userSpaceOnUse' | 'objectBoundingBox'
+  /** SVG2 `mask-type`: how mask content modulates target alpha. */
+  maskType: 'luminance' | 'alpha'
   x?: number; y?: number; width?: number; height?: number
   children: SVGNode[]
   attrs: Record<string, string>
@@ -209,6 +211,7 @@ export interface ResolvedFont {
   getAdvanceWidth: (text: string, fontSize: number) => number
 }
 
+// eslint-disable-next-line pickier/no-unused-vars
 export type FontResolver = (familyList: string, sizeHint: number) => ResolvedFont | null
 
 /** 2x3 affine: [a, b, c, d, tx, ty] applied as (x', y') = (a*x + c*y + tx, b*x + d*y + ty). */

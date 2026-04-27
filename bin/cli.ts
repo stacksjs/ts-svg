@@ -1,31 +1,71 @@
+#!/usr/bin/env bun
+import { readFileSync, writeFileSync } from 'node:fs'
+import { extname, resolve } from 'node:path'
+import process from 'node:process'
 import { CLI } from '@stacksjs/clapp'
 import { version } from '../package.json'
+import { Resvg, svgToPng } from '../src'
 
-const cli = new CLI('my-cli')
+const cli = new CLI('ts-svg')
 
-interface CliOption {
-  from: string
-  verbose: boolean
+interface RenderOpts {
+  out?: string
+  scale?: number
+  width?: number
+  height?: number
+  background?: string
+  tolerance?: number
 }
 
 cli
-  .command('start', 'Start the Reverse Proxy Server')
-  .option('--from <from>', 'The URL to proxy from')
-  .option('--verbose', 'Enable verbose logging')
-  .example('reverse-proxy start --from localhost:5173 --to my-project.localhost')
-  .action(async (options?: CliOption) => {
-    if (!options?.from) {
-      console.error('Missing --from option')
-    }
-    else {
-      console.log('Options:', options)
-    }
+  .command('render <input>', 'Rasterise an SVG file to PNG')
+  .option('-o, --out <file>', 'Output PNG path (default: <input>.png)')
+  .option('-s, --scale <factor>', 'Multiply intrinsic dimensions', { default: 1 })
+  .option('-w, --width <px>', 'Output width in pixels (overrides scale)')
+  .option('-h, --height <px>', 'Output height in pixels (overrides scale)')
+  .option('-b, --background <color>', 'Background colour (e.g. "#fff" or "transparent")')
+  .option('-t, --tolerance <px>', 'Bezier flattening tolerance', { default: 0.25 })
+  .example('ts-svg render logo.svg -o logo.png --scale 2')
+  .action((input: string, options: RenderOpts) => {
+    const inPath = resolve(input)
+    const outPath = options.out
+      ? resolve(options.out)
+      : resolve(inPath.replace(new RegExp(`${extname(inPath)}$`), '.png'))
+
+    const svg = readFileSync(inPath, 'utf8')
+    const r = new Resvg(svg, {
+      fitTo: options.width != null
+        ? { mode: 'width', value: Number(options.width) }
+        : options.height != null
+          ? { mode: 'height', value: Number(options.height) }
+          : { mode: 'zoom', value: Number(options.scale ?? 1) },
+      background: options.background,
+      tolerance: options.tolerance != null ? Number(options.tolerance) : undefined,
+    })
+    const png = r.render().asPng()
+    writeFileSync(outPath, png)
+    console.log(`wrote ${outPath} (${png.byteLength} bytes)`)
   })
 
-cli.command('version', 'Show the version of the CLI').action(() => {
+cli
+  .command('to-png <input>', 'Convenience: parse + render + write in one shot')
+  .option('-o, --out <file>', 'Output PNG path')
+  .option('-s, --scale <factor>', 'Multiply intrinsic dimensions', { default: 1 })
+  .action((input: string, options: { out?: string, scale?: number }) => {
+    const inPath = resolve(input)
+    const outPath = options.out
+      ? resolve(options.out)
+      : resolve(inPath.replace(new RegExp(`${extname(inPath)}$`), '.png'))
+    const svg = readFileSync(inPath, 'utf8')
+    const png = svgToPng(svg, { scale: Number(options.scale ?? 1) })
+    writeFileSync(outPath, png)
+    console.log(`wrote ${outPath} (${png.byteLength} bytes)`)
+  })
+
+cli.command('version', 'Show CLI version').action(() => {
   console.log(version)
 })
 
 cli.version(version)
 cli.help()
-cli.parse()
+cli.parse(process.argv)

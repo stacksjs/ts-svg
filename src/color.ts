@@ -86,12 +86,16 @@ function hslToRgb(h: number, s: number, l: number): [number, number, number] {
   return [(r1 + m) * 255, (g1 + m) * 255, (b1 + m) * 255]
 }
 
-/** Parse a CSS / SVG colour string into an RGBA. Returns transparent black on failure. */
-export function parseColor(input: string | null | undefined): RGBA {
+/**
+ * Parse a CSS / SVG colour string into an RGBA. Returns transparent black on
+ * failure. If `currentColor` is supplied, it overrides the resolution of the
+ * `currentColor` keyword (which would otherwise default to black).
+ */
+export function parseColor(input: string | null | undefined, currentColor?: RGBA): RGBA {
   if (input == null) return TRANSPARENT
   const s = input.trim().toLowerCase()
   if (s === 'none' || s === 'transparent') return TRANSPARENT
-  if (s === 'currentcolor') return BLACK // No "currentColor" cascade in our renderer.
+  if (s === 'currentcolor') return currentColor ?? BLACK
 
   if (s.startsWith('#')) {
     const hex = s.slice(1)
@@ -114,18 +118,17 @@ export function parseColor(input: string | null | undefined): RGBA {
   const rgbm = s.match(/^rgba?\s*\(([^)]+)\)$/)
   if (rgbm) {
     const parts = rgbm[1]!.split(/[\s,/]+/).filter(Boolean)
-    const parse = (v: string, idx: number) => {
-      if (v.endsWith('%')) {
-        const n = Number.parseFloat(v.slice(0, -1)) / 100
-        return idx === 3 ? n * 255 : n * 255
-      }
-      const n = Number.parseFloat(v)
-      return idx === 3 ? n * 255 : n
-    }
-    const r = parse(parts[0] ?? '0', 0)
-    const g = parse(parts[1] ?? '0', 1)
-    const b = parse(parts[2] ?? '0', 2)
-    const a = parts.length >= 4 ? parse(parts[3]!, 3) : 255
+    // Channels: "0..255" or "0..100%". Alpha: "0..1" or "0..100%".
+    const parseChannel = (v: string): number => v.endsWith('%')
+      ? (Number.parseFloat(v.slice(0, -1)) / 100) * 255
+      : Number.parseFloat(v)
+    const parseAlpha = (v: string): number => v.endsWith('%')
+      ? (Number.parseFloat(v.slice(0, -1)) / 100) * 255
+      : Number.parseFloat(v) * 255
+    const r = parseChannel(parts[0] ?? '0')
+    const g = parseChannel(parts[1] ?? '0')
+    const b = parseChannel(parts[2] ?? '0')
+    const a = parts.length >= 4 ? parseAlpha(parts[3]!) : 255
     return { r: clamp255(r), g: clamp255(g), b: clamp255(b), a: clamp255(a) }
   }
 

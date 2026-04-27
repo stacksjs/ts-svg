@@ -49,7 +49,7 @@ export function parsePath(d: string): PathCmd[] {
         case 'M': {
           if (i + 1 >= nums.length) { i = nums.length; break }
           let x = nums[i++]!, y = nums[i++]!
-          if (rel && !first) { x += cx; y += cy } else if (rel) { x += cx; y += cy }
+          if (rel) { x += cx; y += cy }
           if (first) {
             out.push({ t: 'M', x, y })
             startX = x; startY = y
@@ -220,9 +220,10 @@ export function arcToCubics(
 
   // Step 4: angles
   const angle = (ux: number, uy: number, vx: number, vy: number) => {
-    const dot = ux * vx + uy * vy
     const len = Math.sqrt(ux * ux + uy * uy) * Math.sqrt(vx * vx + vy * vy)
-    let a = Math.acos(Math.max(-1, Math.min(1, dot / (len || 1))))
+    if (len === 0) return 0 // degenerate input — angle undefined; treat as 0
+    const dot = ux * vx + uy * vy
+    let a = Math.acos(Math.max(-1, Math.min(1, dot / len)))
     if (ux * vy - uy * vx < 0) a = -a
     return a
   }

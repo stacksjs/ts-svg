@@ -47,13 +47,13 @@ interface Edge {
 }
 
 /** Build edges from a flat polygon `[x0, y0, x1, y1, ...]`. */
-function polygonToEdges(poly: number[], yScale: number): Edge[] {
+function polygonToEdges(poly: number[]): Edge[] {
   const edges: Edge[] = []
   const n = poly.length / 2
   for (let i = 0; i < n; i++) {
     const j = (i + 1) % n
-    const ax = poly[i * 2]!, ay = poly[i * 2 + 1]! * yScale
-    const bx = poly[j * 2]!, by = poly[j * 2 + 1]! * yScale
+    const ax = poly[i * 2]!, ay = poly[i * 2 + 1]!
+    const bx = poly[j * 2]!, by = poly[j * 2 + 1]!
     if (ay === by) continue // horizontal — contributes nothing
     if (ay < by) {
       edges.push({
@@ -117,7 +117,7 @@ export function fillPolygons(fb: Framebuffer, polys: number[][], paint: Paint): 
   for (let s = 0; s < SAMPLES; s++) allEdges.push([])
 
   for (const poly of polys) {
-    const e = polygonToEdges(poly, 1)
+    const e = polygonToEdges(poly)
     for (const edge of e) {
       // Determine which sample lines this edge crosses.
       const yTopSub = Math.floor(edge.yTop * SAMPLES)
@@ -418,29 +418,31 @@ function strokeOutline(poly: number[], st: StrokeStyle, closed: boolean): number
     const first = segs[0]!
     const last = segs[segs.length - 1]!
 
+    // The original implementation built the right rail by `unshift`-ing the
+    // cap points into the front — O(n²) when the cap is a fine arc. Instead,
+    // accumulate the points that should appear at the END of the combined
+    // polygon (after the reversed forward offsets) into separate buffers and
+    // concat them once at the end.
+    const trailingStart: number[] = [] // appears after fwd-offsets-reversed
+    const trailingEnd: number[] = [] // appears after trailingStart
+
     // Start cap (at first.ax)
     if (st.cap === 'square') {
-      // Extend backwards by half along -ux.
       left.push(first.ax + first.nx * half - first.ux * half, first.ay + first.ny * half - first.uy * half)
-      right.unshift(first.ax - first.nx * half - first.ux * half, first.ay - first.ny * half - first.uy * half)
+      trailingStart.push(first.ax - first.nx * half - first.ux * half, first.ay - first.ny * half - first.uy * half)
     }
     else if (st.cap === 'round') {
-      // Half-circle from left rail to right rail at the start.
+      // Half-arc traced CCW: starts at the right-rail offset point, walks
+      // through "behind", finishes at the left-rail offset point. This is the
+      // order needed at the tail of the combined polygon so the loop closes
+      // correctly without `unshift`.
       const cx = first.ax, cy = first.ay
       const aLeft = Math.atan2(first.ny, first.nx)
       const aRight = aLeft + Math.PI
-      const startRing: number[] = []
-      // Trace a half-circle from left back through "behind" to right.
-      for (let i = 0; i <= arcSegs; i++) {
+      for (let i = arcSegs; i >= 0; i--) {
         const t = i / arcSegs
-        const a = aLeft + (aRight - aLeft) * t * -1 // walk CW (away from the path direction)
-        startRing.push(cx + Math.cos(a) * half, cy + Math.sin(a) * half)
-      }
-      // Start the left rail with the second half of the cap (left → behind), and
-      // the right rail with the first half of the cap (behind → right).
-      // For simplicity we just prepend the entire half-arc to the right side.
-      for (let i = startRing.length - 2; i >= 0; i -= 2) {
-        right.unshift(startRing[i]!, startRing[i + 1]!)
+        const a = aLeft - (aRight - aLeft) * t
+        trailingStart.push(cx + Math.cos(a) * half, cy + Math.sin(a) * half)
       }
     }
     // butt cap: no extension; the rails just start at the offset endpoints.
@@ -456,33 +458,32 @@ function strokeOutline(poly: number[], st: StrokeStyle, closed: boolean): number
     // End cap (at last.bx)
     if (st.cap === 'square') {
       left.push(last.bx + last.nx * half + last.ux * half, last.by + last.ny * half + last.uy * half)
-      right.unshift(last.bx - last.nx * half + last.ux * half, last.by - last.ny * half + last.uy * half)
+      trailingEnd.push(last.bx - last.nx * half + last.ux * half, last.by - last.ny * half + last.uy * half)
     }
     else if (st.cap === 'round') {
       const cx = last.bx, cy = last.by
       const aLeft = Math.atan2(last.ny, last.nx)
       const aRight = aLeft - Math.PI
-      // Half-circle from left through "ahead" to right.
-      const endRing: number[] = []
       for (let i = 0; i <= arcSegs; i++) {
         const t = i / arcSegs
         const a = aLeft + (aRight - aLeft) * t
-        endRing.push(cx + Math.cos(a) * half, cy + Math.sin(a) * half)
+        left.push(cx + Math.cos(a) * half, cy + Math.sin(a) * half)
       }
-      for (let i = 0; i < endRing.length; i += 2) left.push(endRing[i]!, endRing[i + 1]!)
     }
 
-    // Right rail: walk forward (pushing points), so the final polygon is
-    // left (forward) → right (reversed) = a closed loop traced CCW.
+    // Right rail forward (will be reversed into the final polygon).
     right.push(first.ax - first.nx * half, first.ay - first.ny * half)
     for (let i = 0; i < segs.length; i++) {
       const s = segs[i]!
       right.push(s.bx - s.nx * half, s.by - s.ny * half)
     }
 
-    // Concatenate left forward + right reversed.
-    const combined: number[] = [...left]
+    // Final order: [left fwd] + [right reversed] + [trailingStart] + [trailingEnd].
+    // This matches the original `unshift`-based output exactly, but builds in O(n).
+    const combined: number[] = left.slice()
     for (let i = right.length - 2; i >= 0; i -= 2) combined.push(right[i]!, right[i + 1]!)
+    for (let i = 0; i < trailingStart.length; i++) combined.push(trailingStart[i]!)
+    for (let i = 0; i < trailingEnd.length; i++) combined.push(trailingEnd[i]!)
     return [combined]
   }
 
@@ -524,7 +525,8 @@ function dashedSubpaths(poly: number[], dashArray: number[], dashOffset: number,
     idx = (idx + 1) % arr.length
   }
   let remainInDash = arr[idx]! - (off - acc)
-  let drawing = idx % 2 === 0 // even index = on (dash), odd = off (gap)
+  // even index = on (dash), odd index = off (gap)
+  let drawing = idx % 2 === 0
 
   const out: number[][] = []
   let current: number[] | null = null

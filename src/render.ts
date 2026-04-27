@@ -3,12 +3,13 @@
  * rasterise into an RGBA framebuffer.
  */
 
-import type { BaseNode, FontResolver, Matrix, RGBA, SVGCircle, SVGClipPath, SVGDefs, SVGElementNode, SVGEllipse, SVGLine, SVGMask, SVGNode, SVGPath, SVGPolygon, SVGRect, SVGRoot, SVGText, SVGUse } from './types'
-import { parseColor } from './color'
+import type { BaseNode, FontResolver, Matrix, RGBA, SVGDefs, SVGElementNode, SVGNode, SVGPath, SVGPolygon, SVGRect, SVGRoot, SVGText, SVGUse } from './types'
+import { config } from './config'
+import { BLACK, parseColor } from './color'
 import { buildGradientPaint, parseUrlRef, polysBBox, type PaintContext } from './paint'
 import { flattenCommands, flattenCubic, parsePath } from './path'
-import { createFramebuffer, DEFAULT_STROKE, fillPolygons, strokePolylines, type Framebuffer, type Paint, type StrokeStyle } from './raster'
-import { applyMatrix, IDENTITY, multiply } from './transform'
+import { createFramebuffer, fillPolygons, strokePolylines, type Framebuffer, type Paint, type StrokeStyle } from './raster'
+import { IDENTITY, invertMatrix, multiply } from './transform'
 
 export interface RenderOptions {
   /** Output width in pixels. Overrides the SVG's intrinsic width. */
@@ -23,6 +24,10 @@ export interface RenderOptions {
   tolerance?: number
   /** Resolves `<text>` elements to a font. If unset, text is skipped. */
   fontResolver?: FontResolver
+  /** Resolves `currentColor` references. Defaults to the value from svg.config.ts. */
+  currentColor?: string | RGBA
+  /** Maximum recursion depth for `<use>`. Defaults to the value from svg.config.ts. */
+  maxUseDepth?: number
 }
 
 interface RenderCtx {
@@ -32,6 +37,8 @@ interface RenderCtx {
   tolerance: number
   fontResolver?: FontResolver
   defs: SVGDefs
+  currentColor: RGBA
+  maxUseDepth: number
 }
 
 interface InheritedStyle {
@@ -49,14 +56,21 @@ interface InheritedStyle {
   transform: Matrix
   clipPath?: string
   mask?: string
+  /** Cascaded `color` value used to resolve `currentColor` paints. */
+  currentColor: RGBA
+  /** Active `<use>` recursion depth — bumped per `<use>` resolution. */
+  useDepth: number
 }
 
 function inheritStyle(parent: InheritedStyle, node: BaseNode): InheritedStyle {
   const out: InheritedStyle = { ...parent }
+  // Thread `color` (cascaded) so `currentColor` references resolve correctly.
+  const colorAttr = node.attrs?.color
+  if (colorAttr) out.currentColor = parseColor(colorAttr, parent.currentColor)
   if (node.fill === null) out.fill = null
-  else if (node.fill !== undefined) out.fill = parseColor(node.fill)
+  else if (node.fill !== undefined) out.fill = parseColor(node.fill, out.currentColor)
   if (node.stroke === null) out.stroke = null
-  else if (node.stroke !== undefined) out.stroke = parseColor(node.stroke)
+  else if (node.stroke !== undefined) out.stroke = parseColor(node.stroke, out.currentColor)
   if (node.strokeWidth != null) out.strokeWidth = node.strokeWidth
   if (node.strokeLineCap) out.strokeLineCap = node.strokeLineCap
   if (node.strokeLineJoin) out.strokeLineJoin = node.strokeLineJoin
@@ -87,14 +101,15 @@ function effectiveStroke(s: InheritedStyle): { color: RGBA, width: number } | nu
   return { color: { ...s.stroke, a }, width: s.strokeWidth }
 }
 
-/** Apply a 2x3 transform to a flat polygon `[x0, y0, x1, y1, ...]` in place
- *  (returns a new array). */
+/** Apply a 2x3 transform to a flat polygon `[x0, y0, x1, y1, ...]`. */
 function transformPoly(poly: number[], m: Matrix): number[] {
-  const out = Array.from({ length: poly.length }) as number[]
-  for (let i = 0; i < poly.length; i += 2) {
+  const n = poly.length
+  const out = new Array<number>(n)
+  const a = m[0], b = m[1], c = m[2], d = m[3], tx = m[4], ty = m[5]
+  for (let i = 0; i < n; i += 2) {
     const x = poly[i]!, y = poly[i + 1]!
-    out[i] = m[0] * x + m[2] * y + m[4]
-    out[i + 1] = m[1] * x + m[3] * y + m[5]
+    out[i] = a * x + c * y + tx
+    out[i + 1] = b * x + d * y + ty
   }
   return out
 }
@@ -156,11 +171,6 @@ function ellipseToPolys(cx: number, cy: number, rx: number, ry: number, toleranc
   return [pts]
 }
 
-function lineToPolys(_l: SVGLine): number[][] {
-  // A bare line has no fill area; the renderer treats it as an empty fill
-  // and a separate stroke pass.
-  return []
-}
 
 function polygonToPolys(p: SVGPolygon): number[][] {
   if (p.points.length < 2) return []
@@ -193,7 +203,8 @@ function shapeToPolys(node: SVGElementNode, tolerance: number, resolver: FontRes
     case 'rect': return rectToPolys(node, tolerance)
     case 'circle': return ellipseToPolys(node.cx, node.cy, node.r, node.r, tolerance)
     case 'ellipse': return ellipseToPolys(node.cx, node.cy, node.rx, node.ry, tolerance)
-    case 'line': return lineToPolys(node)
+    // A bare <line> has no fill area; emitted via the stroke pass.
+    case 'line': return []
     case 'polygon':
     case 'polyline': return polygonToPolys(node)
     case 'path': return pathToPolys(node, tolerance)
@@ -210,19 +221,6 @@ function shapeToPolylines(node: SVGElementNode, tolerance: number, resolver: Fon
     case 'polyline': return { polys: polygonToPolys(node), closed: false }
     default: return { polys: shapeToPolys(node, tolerance, resolver), closed: true }
   }
-}
-
-/** Invert a 2x3 affine; null if singular. */
-function invertMatrix(m: Matrix): Matrix | null {
-  const det = m[0] * m[3] - m[1] * m[2]
-  if (Math.abs(det) < 1e-12) return null
-  const a = m[3] / det
-  const b = -m[1] / det
-  const c = -m[2] / det
-  const d = m[0] / det
-  const tx = (m[2] * m[5] - m[3] * m[4]) / det
-  const ty = (m[1] * m[4] - m[0] * m[5]) / det
-  return [a, b, c, d, tx, ty]
 }
 
 /** Composite `src` over `dest` (Porter-Duff). Same dimensions assumed. */
@@ -289,12 +287,20 @@ function renderNode(node: SVGNode, parentStyle: InheritedStyle, ctx: RenderCtx):
 
   // <use> resolution: render the referenced element with the use's
   // (x, y) translation prepended and the use element's style applied.
+  // We cap recursion depth to defend against cyclic references like
+  // <use href="#a"> inside an element with id="a".
   if (node.tag === 'use') {
+    if (style.useDepth >= ctx.maxUseDepth) {
+      if (config.verbose) {
+        console.warn(`ts-svg: <use href="#${(node as SVGUse).href}"> exceeded maxUseDepth (${ctx.maxUseDepth}); skipping`)
+      }
+      return
+    }
     const target = ctx.defs.byId.get((node as SVGUse).href)
     if (!target) return
     const useT: Matrix = [1, 0, 0, 1, (node as SVGUse).x, (node as SVGUse).y]
     const composedTransform = multiply(style.transform, useT)
-    const newStyle: InheritedStyle = { ...style, transform: composedTransform }
+    const newStyle: InheritedStyle = { ...style, transform: composedTransform, useDepth: style.useDepth + 1 }
     renderNode(target, newStyle, ctx)
     return
   }
@@ -363,8 +369,34 @@ function drawShape(node: SVGNode, style: InheritedStyle, ctx: RenderCtx): void {
 }
 
 /**
+ * Compute the user-space bbox of a node (and its descendants) — used to
+ * resolve `objectBoundingBox` units on clipPath / mask referrers.
+ */
+function nodeUserBBox(node: SVGNode, tolerance: number, resolver: FontResolver | undefined): { x: number, y: number, width: number, height: number } {
+  if (node.tag === 'svg' || node.tag === 'g') {
+    let xMin = Infinity, yMin = Infinity, xMax = -Infinity, yMax = -Infinity
+    for (const c of node.children) {
+      const b = nodeUserBBox(c, tolerance, resolver)
+      if (b.width === 0 && b.height === 0) continue
+      if (b.x < xMin) xMin = b.x
+      if (b.y < yMin) yMin = b.y
+      if (b.x + b.width > xMax) xMax = b.x + b.width
+      if (b.y + b.height > yMax) yMax = b.y + b.height
+    }
+    if (!Number.isFinite(xMin)) return { x: 0, y: 0, width: 0, height: 0 }
+    return { x: xMin, y: yMin, width: xMax - xMin, height: yMax - yMin }
+  }
+  if (node.tag === 'use') return { x: 0, y: 0, width: 0, height: 0 }
+  return polysBBox(shapeToPolys(node, tolerance, resolver))
+}
+
+/**
  * Render a node (or group) into a transparent offscreen buffer, then mask
  * by clip-path and/or mask refs, then composite back into the main fb.
+ *
+ * Honours `clipPathUnits` and `maskUnits`/`maskContentUnits`: when set to
+ * `objectBoundingBox`, the clip/mask coordinate system is the unit square
+ * mapped onto the target element's user-space bbox.
  */
 function renderLayer(node: SVGNode, style: InheritedStyle, ctx: RenderCtx, clipId: string | null, maskId: string | null): void {
   const offscreen = createFramebuffer(ctx.fb.width, ctx.fb.height, { r: 0, g: 0, b: 0, a: 0 })
@@ -380,15 +412,27 @@ function renderLayer(node: SVGNode, style: InheritedStyle, ctx: RenderCtx, clipI
     drawShape(node, innerStyle, layerCtx)
   }
 
+  // Compute the target's user-space bbox once for objectBoundingBox lookups.
+  let targetBBox: { x: number, y: number, width: number, height: number } | null = null
+  const ensureBBox = (): { x: number, y: number, width: number, height: number } => {
+    if (!targetBBox) targetBBox = nodeUserBBox(node, ctx.tolerance, ctx.fontResolver)
+    return targetBBox
+  }
+
   if (clipId) {
     const clip = ctx.defs.clipPaths.get(clipId)
     if (clip) {
       const mask = createFramebuffer(ctx.fb.width, ctx.fb.height, { r: 0, g: 0, b: 0, a: 0 })
       const maskCtx: RenderCtx = { ...ctx, fb: mask }
-      // Render clip children as fill-only with white paint to build alpha.
-      for (const c of clip.children) {
-        renderNode(c, { ...innerStyle, fill: { r: 255, g: 255, b: 255, a: 255 }, stroke: null }, maskCtx)
+      // For objectBoundingBox, prepend a transform that maps the unit square
+      // onto the target element's user-space bbox.
+      let clipStyle: InheritedStyle = { ...innerStyle, fill: { r: 255, g: 255, b: 255, a: 255 }, stroke: null }
+      if (clip.units === 'objectBoundingBox') {
+        const bb = ensureBBox()
+        const t: Matrix = [bb.width, 0, 0, bb.height, bb.x, bb.y]
+        clipStyle = { ...clipStyle, transform: multiply(innerStyle.transform, t) }
       }
+      for (const c of clip.children) renderNode(c, clipStyle, maskCtx)
       multiplyAlpha(offscreen, mask)
     }
   }
@@ -398,10 +442,15 @@ function renderLayer(node: SVGNode, style: InheritedStyle, ctx: RenderCtx, clipI
     if (mask) {
       const maskFb = createFramebuffer(ctx.fb.width, ctx.fb.height, { r: 0, g: 0, b: 0, a: 0 })
       const maskCtx: RenderCtx = { ...ctx, fb: maskFb }
-      for (const c of mask.children) {
-        renderNode(c, innerStyle, maskCtx)
+      let maskStyle: InheritedStyle = innerStyle
+      if (mask.contentUnits === 'objectBoundingBox') {
+        const bb = ensureBBox()
+        const t: Matrix = [bb.width, 0, 0, bb.height, bb.x, bb.y]
+        maskStyle = { ...innerStyle, transform: multiply(innerStyle.transform, t) }
       }
-      multiplyLuminance(offscreen, maskFb)
+      for (const c of mask.children) renderNode(c, maskStyle, maskCtx)
+      if (mask.maskType === 'alpha') multiplyAlpha(offscreen, maskFb)
+      else multiplyLuminance(offscreen, maskFb)
     }
   }
 
@@ -418,9 +467,15 @@ export function rasterize(root: SVGRoot, opts: RenderOptions = {}): Framebuffer 
   const width = Math.max(1, Math.round(opts.width ?? intrinsicW * scale))
   const height = Math.max(1, Math.round(opts.height ?? intrinsicH * scale))
 
-  const bg = typeof opts.background === 'string'
-    ? parseColor(opts.background)
-    : opts.background ?? { r: 0, g: 0, b: 0, a: 0 }
+  // Resolve currentColor early — used both for `bg` parsing and to seed the cascade.
+  const currentColor: RGBA = typeof opts.currentColor === 'string'
+    ? parseColor(opts.currentColor)
+    : opts.currentColor ?? parseColor(config.currentColor)
+
+  const bgInput = opts.background ?? config.background
+  const bg: RGBA = typeof bgInput === 'string'
+    ? parseColor(bgInput, currentColor)
+    : bgInput ?? { r: 0, g: 0, b: 0, a: 0 }
 
   const fb = createFramebuffer(width, height, bg)
 
@@ -458,14 +513,16 @@ export function rasterize(root: SVGRoot, opts: RenderOptions = {}): Framebuffer 
   const ctx: RenderCtx = {
     fb,
     rootTransform: root2dev,
-    tolerance: opts.tolerance ?? 0.25,
+    tolerance: opts.tolerance ?? config.tolerance,
     fontResolver: opts.fontResolver,
     defs: root.defs,
+    currentColor,
+    maxUseDepth: opts.maxUseDepth ?? config.maxUseDepth,
   }
 
   // Initial style: SVG defaults — fill=black, stroke=none, stroke-width=1.
   const initialStyle: InheritedStyle = {
-    fill: parseColor('black'),
+    fill: BLACK,
     stroke: null,
     strokeWidth: 1,
     strokeLineCap: 'butt',
@@ -477,11 +534,11 @@ export function rasterize(root: SVGRoot, opts: RenderOptions = {}): Framebuffer 
     fillOpacity: 1,
     strokeOpacity: 1,
     transform: IDENTITY,
+    currentColor,
+    useDepth: 0,
   }
 
   renderNode(root, initialStyle, ctx)
-  // Suppress unused-import warnings for type-only refs.
-  void applyMatrix
   return fb
 }
 

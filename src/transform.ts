@@ -26,6 +26,19 @@ export function applyMatrix(m: Matrix, x: number, y: number): [number, number] {
   return [m[0] * x + m[2] * y + m[4], m[1] * x + m[3] * y + m[5]]
 }
 
+/** Invert a 2x3 affine. Returns null if the matrix is singular. */
+export function invertMatrix(m: Matrix): Matrix | null {
+  const det = m[0] * m[3] - m[1] * m[2]
+  if (Math.abs(det) < 1e-12) return null
+  const a = m[3] / det
+  const b = -m[1] / det
+  const c = -m[2] / det
+  const d = m[0] / det
+  const tx = (m[2] * m[5] - m[3] * m[4]) / det
+  const ty = (m[1] * m[4] - m[0] * m[5]) / det
+  return [a, b, c, d, tx, ty]
+}
+
 function translate(tx: number, ty = 0): Matrix {
   return [1, 0, 0, 1, tx, ty]
 }
@@ -61,7 +74,9 @@ export function parseTransform(s: string): Matrix {
     let next: Matrix
     switch (fn) {
       case 'matrix':
-        next = (args.length === 6 ? args : [1, 0, 0, 1, 0, 0]) as unknown as Matrix
+        next = args.length === 6
+          ? [args[0]!, args[1]!, args[2]!, args[3]!, args[4]!, args[5]!]
+          : IDENTITY
         break
       case 'translate':
         next = translate(args[0] ?? 0, args[1] ?? 0)

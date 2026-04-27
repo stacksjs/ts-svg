@@ -3,44 +3,123 @@
 [![npm version][npm-version-src]][npm-version-href]
 [![GitHub Actions][github-actions-src]][github-actions-href]
 [![Commitizen friendly](https://img.shields.io/badge/commitizen-friendly-brightgreen.svg)](http://commitizen.github.io/cz-cli/)
-<!-- [![npm downloads][npm-downloads-src]][npm-downloads-href] -->
-<!-- [![Codecov][codecov-src]][codecov-href] -->
 
-# bun-ts-starter
+# ts-svg
 
-This is an opinionated TypeScript Starter kit to help kick-start development of your next Bun package.
+Pure-TypeScript SVG parser, rasterizer, and PNG encoder for Bun & Node — no native bindings, no resvg WASM, no Skia. Ships a typed element-tree API and a drop-in `Resvg`-compatible class shim.
+
+```ts
+import { svgToPng } from 'ts-svg'
+import { writeFileSync } from 'node:fs'
+
+const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="200" height="80">
+  <rect width="100%" height="100%" fill="#0ea5e9"/>
+  <text x="100" y="50" text-anchor="middle" font-family="sans-serif" font-size="24" fill="white">ts-svg</text>
+</svg>`
+
+writeFileSync('out.png', svgToPng(svg, { scale: 2 }))
+```
+
+## Install
+
+```bash
+bun add ts-svg
+# or
+npm install ts-svg
+```
 
 ## Features
 
-This Starter Kit comes pre-configured with the following:
+- **Pure TS / no native deps.** Runs anywhere Bun or Node runs.
+- **Drop-in `Resvg` shim.** `import { Resvg } from 'ts-svg'` replaces `@resvg/resvg-js` for the common path.
+- **Typed element tree.** `parseSVG(svg)` produces `SVGRoot` you can walk, mutate, and re-serialise.
+- **Analytical AA rasterizer.** 4× horizontal sub-sampling for smooth edges; non-zero fill rule.
+- **Real path support.** Full `M m L l H h V v C c S s Q q T t A a Z z` grammar with adaptive cubic / quadratic / arc flattening.
+- **Gradients, clip-paths, masks, `<use>`** — including `objectBoundingBox` units, `mask-type="alpha"`, and `xlink:href` chaining for gradients.
+- **Stroke styling.** `stroke-width`, `stroke-linecap`, `stroke-linejoin`, `miter-limit`, `dasharray` + `dashoffset`.
+- **Bunfig-powered config.** Drop a `svg.config.ts` next to your `package.json` and library defaults pick it up automatically.
 
-- 🛠️ [Powerful Build Process](https://github.com/oven-sh/bun) - via Bun
-- 💪🏽 [Fully Typed APIs](https://www.typescriptlang.org/) - via TypeScript
-- 📚 [Documentation-ready](https://vitepress.dev/) - via VitePress
-- ⌘ [CLI & Binary](https://www.npmjs.com/package/bunx) - via Bun & CAC
-- 🧪 [Built With Testing In Mind](https://bun.sh/docs/cli/test) - pre-configured unit-testing powered by [Bun](https://bun.sh/docs/cli/test)
-- 🤖 [Renovate](https://renovatebot.com/) - optimized & automated PR dependency updates
-- 🎨 [ESLint](https://eslint.org/) - for code linting _(and formatting)_
-- 📦️ [pkg.pr.new](https://pkg.pr.new) - Continuous (Preview) Releases for your libraries
-- 🐙 [GitHub Actions](https://github.com/features/actions) - runs your CI _(fixes code style issues, tags releases & creates its changelogs, runs the test suite, etc.)_
+## API
 
-## Get Started
+### Convenience pipeline
 
-It's rather simple to get your package development started:
-
-```bash
-# you may use this GitHub template or the following command:
-bunx degit stacksjs/ts-starter my-pkg
-cd my-pkg
-
-bun i # install all deps
-bun run build # builds the library for production-ready use
-
-# after you have successfully committed, you may create a "release"
-bun run release # automates git commits, versioning, and changelog generations
+```ts
+import { svgToPng } from 'ts-svg'
+const png: Buffer = svgToPng(svgString, { scale: 2 })
 ```
 
-_Check out the package.json scripts for more commands._
+### Element tree
+
+```ts
+import { parseSVG, rasterize, encodePng } from 'ts-svg'
+
+const root = parseSVG(svgString)        // typed SVGRoot
+const fb = rasterize(root, { scale: 2 }) // Framebuffer (RGBA Uint8Array)
+const png = encodePng(fb)                // Buffer
+```
+
+### Resvg-compatible shim
+
+```ts
+import { Resvg } from 'ts-svg'
+
+const resvg = new Resvg(svgString, {
+  fitTo: { mode: 'width', value: 1024 },
+  background: '#fff',
+})
+const img = resvg.render()
+img.width()      // number
+img.height()     // number
+img.pixels()     // Uint8Array (RGBA, top-to-bottom; copy of the framebuffer)
+img.asPng()      // Buffer
+```
+
+`fitTo.mode` accepts `'original'`, `'zoom'`, `'width'`, or `'height'`. The shim caches the parsed tree, so calling `render()` twice doesn't re-parse.
+
+### `RenderOptions`
+
+| key | type | default | notes |
+| --- | --- | --- | --- |
+| `width` | `number` | intrinsic | Output width in px (overrides `scale`). |
+| `height` | `number` | intrinsic | Output height in px (overrides `scale`). |
+| `scale` | `number` | `1` | Multiplier on the SVG's intrinsic size. |
+| `background` | `string \| RGBA` | transparent | CSS color or RGBA literal. |
+| `tolerance` | `number` | `0.25` | Bezier flattening tolerance in user units. |
+| `currentColor` | `string` | `black` | Resolves `currentColor` references. |
+| `fontResolver` | `FontResolver` | — | Function that maps `font-family` to a font; without it `<text>` is skipped. |
+
+## CLI
+
+```bash
+ts-svg render logo.svg -o logo.png --scale 2
+ts-svg render logo.svg --width 1024 --background "#fff"
+ts-svg to-png logo.svg
+```
+
+## Configuration
+
+Create `svg.config.ts` in your project root:
+
+```ts
+import type { SvgConfig } from 'ts-svg'
+
+const config: Partial<SvgConfig> = {
+  tolerance: 0.5,        // coarser flattening for huge documents
+  background: '#ffffff',
+  currentColor: '#1f2937',
+  maxUseDepth: 8,
+  verbose: true,
+}
+
+export default config
+```
+
+Powered by [bunfig](https://github.com/stacksjs/bunfig). The file is auto-discovered at import time.
+
+## Scope
+
+- **Supported:** `svg`, `g`, `defs`, `rect`, `circle`, `ellipse`, `line`, `polygon`, `polyline`, `path`, `text` (with a font resolver), `use`, `linearGradient`, `radialGradient`, `clipPath`, `mask`.
+- **Out of scope (today):** `<style>`/CSS selectors, `<filter>` (no Gaussian blur etc.), `<image>`, `<pattern>`, `<symbol>` advanced semantics, `<tspan>` per-glyph positioning.
 
 ## Testing
 
@@ -48,36 +127,15 @@ _Check out the package.json scripts for more commands._
 bun test
 ```
 
+The `fixtures.test.ts` suite asserts pixel-level structural facts (specific colours at specific coordinates) for every supported element so regressions are caught immediately.
+
 ## Changelog
 
-Please see our [releases](https://github.com/stackjs/bun-ts-starter/releases) page for more information on what has changed recently.
+Please see our [releases](https://github.com/stacksjs/ts-svg/releases) page for more information on what has changed recently.
 
 ## Contributing
 
 Please see [CONTRIBUTING](.github/CONTRIBUTING.md) for details.
-
-## Community
-
-For help, discussion about best practices, or any other conversation that would benefit from being searchable:
-
-[Discussions on GitHub](https://github.com/stacksjs/ts-starter/discussions)
-
-For casual chit-chat with others using this package:
-
-[Join the Stacks Discord Server](https://discord.gg/stacksjs)
-
-## Postcardware
-
-“Software that is free, but hopes for a postcard.” We love receiving postcards from around the world showing where Stacks is being used! We showcase them on our website too.
-
-Our address: Stacks.js, 12665 Village Ln #2306, Playa Vista, CA 90094, United States 🌎
-
-## Sponsors
-
-We would like to extend our thanks to the following sponsors for funding Stacks development. If you are interested in becoming a sponsor, please reach out to us.
-
-- [JetBrains](https://www.jetbrains.com/)
-- [The Solana Foundation](https://solana.com/)
 
 ## License
 
@@ -86,10 +144,7 @@ The MIT License (MIT). Please see [LICENSE](LICENSE.md) for more information.
 Made with 💙
 
 <!-- Badges -->
-[npm-version-src]: https://img.shields.io/npm/v/bun-ts-starter?style=flat-square
-[npm-version-href]: https://npmjs.com/package/bun-ts-starter
-[github-actions-src]: https://img.shields.io/github/actions/workflow/status/stacksjs/ts-starter/ci.yml?style=flat-square&branch=main
-[github-actions-href]: https://github.com/stacksjs/ts-starter/actions?query=workflow%3Aci
-
-<!-- [codecov-src]: https://img.shields.io/codecov/c/gh/stacksjs/ts-starter/main?style=flat-square
-[codecov-href]: https://codecov.io/gh/stacksjs/ts-starter -->
+[npm-version-src]: https://img.shields.io/npm/v/ts-svg?style=flat-square
+[npm-version-href]: https://npmjs.com/package/ts-svg
+[github-actions-src]: https://img.shields.io/github/actions/workflow/status/stacksjs/ts-svg/ci.yml?style=flat-square&branch=main
+[github-actions-href]: https://github.com/stacksjs/ts-svg/actions?query=workflow%3Aci

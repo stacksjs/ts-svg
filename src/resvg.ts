@@ -6,9 +6,13 @@
  *
  *   const r = new Resvg(svgString, { fitTo: { mode: 'zoom', value: 4 } })
  *   const png = r.render().asPng()
+ *
+ * The constructor parses the SVG once and caches the tree, so calling
+ * `render()` multiple times doesn't re-parse.
  */
 
 import type { Buffer } from 'node:buffer'
+import type { FontResolver, SVGRoot } from './types'
 import { encodePng } from './png'
 import { parseSVG } from './parser'
 import { rasterize, type RenderOptions } from './render'
@@ -19,6 +23,11 @@ export interface ResvgFitTo {
   value?: number
 }
 
+/**
+ * Subset of `@resvg/resvg-js` options we honour. Unsupported keys are
+ * accepted (typed) but currently ignored — they're listed so a `tsc`-clean
+ * call site won't break when migrating from resvg-js.
+ */
 export interface ResvgOptions {
   /** Resize behaviour. `'zoom'` multiplies intrinsic dims; others set explicit. */
   fitTo?: ResvgFitTo
@@ -26,6 +35,25 @@ export interface ResvgOptions {
   background?: string
   /** Bezier flattening tolerance in user units. */
   tolerance?: number
+  /** Resolves `currentColor` references. */
+  currentColor?: string
+  /** Hard cap on `<use>` recursion. */
+  maxUseDepth?: number
+  /** Resolves `<text>` font lookups. Without it `<text>` is skipped. */
+  fontResolver?: FontResolver
+  /** Crop the output bounds. Currently accepted for compat but ignored. */
+  crop?: { left?: number, top?: number, right?: number, bottom?: number }
+
+  // The following resvg-js fields are accepted for type compatibility but
+  // are not yet implemented by ts-svg. Document explicitly so users know
+  // they are no-ops; remove from the interface when implemented.
+  font?: unknown
+  dpi?: number
+  shapeRendering?: number
+  textRendering?: number
+  imageRendering?: number
+  logLevel?: 'off' | 'error' | 'warn' | 'info' | 'debug' | 'trace'
+  imagesToResolve?: unknown
 }
 
 export class RenderedImage {
@@ -35,9 +63,13 @@ export class RenderedImage {
     return encodePng(this.fb)
   }
 
-  /** Raw RGBA buffer, top-to-bottom. */
+  /**
+   * Returns a *copy* of the raw RGBA buffer, top-to-bottom. Mutating the
+   * returned array does NOT affect the cached framebuffer. (The original
+   * implementation handed back the live Uint8Array — a footgun.)
+   */
   pixels(): Uint8Array {
-    return this.fb.data
+    return new Uint8Array(this.fb.data)
   }
 
   width(): number { return this.fb.width }
@@ -45,46 +77,51 @@ export class RenderedImage {
 }
 
 export class Resvg {
-  private renderOptions: RenderOptions
+  private readonly renderOptions: RenderOptions
+  private readonly aspectMode: 'width' | 'height' | null
+  /** Cached parse so repeated `.render()` calls don't re-tokenise. */
+  private readonly root: SVGRoot
 
-  constructor(private readonly svg: string, options: ResvgOptions = {}) {
+  constructor(svg: string, options: ResvgOptions = {}) {
     const fitTo = options.fitTo ?? { mode: 'original' }
     const opts: RenderOptions = {
       background: options.background,
       tolerance: options.tolerance,
+      currentColor: options.currentColor,
+      maxUseDepth: options.maxUseDepth,
+      fontResolver: options.fontResolver,
     }
+    let aspectMode: 'width' | 'height' | null = null
     if (fitTo.mode === 'zoom' && fitTo.value != null) {
       opts.scale = fitTo.value
     }
     else if (fitTo.mode === 'width' && fitTo.value != null) {
       opts.width = fitTo.value
-      // height left unset — renderer maintains aspect via viewBox.
-      // But we don't have intrinsic dims yet; render() will compute height.
-      ;(opts as RenderOptions & { _maintainAspect?: 'width' })._maintainAspect = 'width'
+      aspectMode = 'width'
     }
     else if (fitTo.mode === 'height' && fitTo.value != null) {
       opts.height = fitTo.value
-      ;(opts as RenderOptions & { _maintainAspect?: 'height' })._maintainAspect = 'height'
+      aspectMode = 'height'
     }
     this.renderOptions = opts
+    this.aspectMode = aspectMode
+    this.root = parseSVG(svg)
   }
 
   render(): RenderedImage {
-    const root = parseSVG(this.svg)
-    const opts = { ...this.renderOptions }
+    const opts: RenderOptions = { ...this.renderOptions }
 
     // Resolve "fitTo: width/height" by maintaining aspect ratio from intrinsic dims.
-    const aspectMode = (opts as RenderOptions & { _maintainAspect?: 'width' | 'height' })._maintainAspect
-    if (aspectMode === 'width' && opts.width != null) {
-      const aspect = (root.height || (root.viewBox?.height ?? 1)) / (root.width || (root.viewBox?.width ?? 1))
+    if (this.aspectMode === 'width' && opts.width != null) {
+      const aspect = (this.root.height || (this.root.viewBox?.height ?? 1)) / (this.root.width || (this.root.viewBox?.width ?? 1))
       opts.height = Math.round(opts.width * aspect)
     }
-    else if (aspectMode === 'height' && opts.height != null) {
-      const aspect = (root.width || (root.viewBox?.width ?? 1)) / (root.height || (root.viewBox?.height ?? 1))
+    else if (this.aspectMode === 'height' && opts.height != null) {
+      const aspect = (this.root.width || (this.root.viewBox?.width ?? 1)) / (this.root.height || (this.root.viewBox?.height ?? 1))
       opts.width = Math.round(opts.height * aspect)
     }
 
-    const fb = rasterize(root, opts)
+    const fb = rasterize(this.root, opts)
     return new RenderedImage(fb)
   }
 }

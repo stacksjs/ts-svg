@@ -5,7 +5,7 @@
  */
 
 import type { Matrix, RGBA, SVGGradient, SVGGradientStop, SVGLinearGradient, SVGRadialGradient } from './types'
-import { multiply } from './transform'
+import { applyMatrix, invertMatrix } from './transform'
 
 /** Match a `fill: url(#id)` / `fill: url("#id")` reference. */
 const URL_REF_RE = /^url\(["']?#([^"')]+)["']?\)\s*$/
@@ -57,23 +57,6 @@ function applySpread(t: number, spread: SVGGradient['spreadMethod']): number {
   return r
 }
 
-/** Invert a 2x3 affine. Returns null if singular. */
-function invertMatrix(m: Matrix): Matrix | null {
-  const det = m[0] * m[3] - m[1] * m[2]
-  if (Math.abs(det) < 1e-12) return null
-  const a = m[3] / det
-  const b = -m[1] / det
-  const c = -m[2] / det
-  const d = m[0] / det
-  const tx = (m[2] * m[5] - m[3] * m[4]) / det
-  const ty = (m[1] * m[4] - m[0] * m[5]) / det
-  return [a, b, c, d, tx, ty]
-}
-
-function applyMatrix(m: Matrix, x: number, y: number): [number, number] {
-  return [m[0] * x + m[2] * y + m[4], m[1] * x + m[3] * y + m[5]]
-}
-
 export interface PaintContext {
   /** Element bounding box in user space, used for objectBoundingBox gradients. */
   bbox: { x: number, y: number, width: number, height: number }
@@ -116,47 +99,66 @@ export function buildLinearGradientPaint(g: SVGLinearGradient, ctx: PaintContext
 }
 
 /**
- * Build a sample-able paint function for a radial gradient. Honours focal
- * point (fx, fy) — the gradient parameter is the ratio of the pixel's
- * distance from the focal point along the line through the center.
+ * Build a sample-able paint function for a radial gradient.
+ *
+ * The gradient parameter `t` for a pixel `P` is the ratio along the ray
+ * `F → P` of the distance from `F` (the focal point) to `P`, divided by
+ * the distance from `F` to where that ray exits the gradient circle
+ * (centre `C`, radius `r`). This matches the SVG 1.1 spec.
  */
 export function buildRadialGradientPaint(g: SVGRadialGradient, ctx: PaintContext): { sample: (x: number, y: number) => RGBA } {
   let cx = g.cx, cy = g.cy, r = g.r, fx = g.fx, fy = g.fy
   if (g.units === 'objectBoundingBox') {
     cx = ctx.bbox.x + ctx.bbox.width * g.cx
     cy = ctx.bbox.y + ctx.bbox.height * g.cy
-    r = Math.max(ctx.bbox.width, ctx.bbox.height) * g.r
+    // Per SVG spec, in objectBoundingBox the unit square maps onto the
+    // bbox; a circle of radius `g.r` in unit space therefore covers
+    // `g.r * sqrt(w² + h²) / sqrt(2)` in user space (the bbox diagonal
+    // scaled by g.r so r=0.5 fits a centred circle through the corners).
+    r = g.r * Math.hypot(ctx.bbox.width, ctx.bbox.height) / Math.SQRT2
     fx = ctx.bbox.x + ctx.bbox.width * g.fx
     fy = ctx.bbox.y + ctx.bbox.height * g.fy
   }
-  let txm: Matrix | null = g.gradientTransform ? invertMatrix(g.gradientTransform) : null
-  if (g.gradientTransform && !txm) txm = null
-  // We invert the gradientTransform so we can sample in untransformed gradient
-  // space (which is where cx/cy/r live).
+  // Sampling in untransformed gradient space — invert gradientTransform.
+  const txm: Matrix | null = g.gradientTransform ? invertMatrix(g.gradientTransform) : null
 
   if (r === 0) {
     const c = g.stops[g.stops.length - 1]?.color ?? { r: 0, g: 0, b: 0, a: 0 }
     return { sample: () => c }
   }
 
+  // If the focal point lies outside the gradient circle, clamp it to the
+  // circle (per spec) so the ray-circle intersection always exists.
+  const fdx0 = fx - cx, fdy0 = fy - cy
+  const fdist = Math.hypot(fdx0, fdy0)
+  if (fdist > r * 0.999) {
+    const k = (r * 0.999) / fdist
+    fx = cx + fdx0 * k
+    fy = cy + fdy0 * k
+  }
+  const fxc = fx - cx, fyc = fy - cy
+  const r2 = r * r
+
   return {
     sample: (px, py) => {
       let [ux, uy] = applyMatrix(ctx.devToUser, px, py)
       if (txm) [ux, uy] = applyMatrix(txm, ux, uy)
-      // For non-coincident focal, the gradient parameter is computed by
-      // intersecting the ray (focal → pixel) with the bounding circle.
-      // For simplicity we use the standard centre-based normalisation here
-      // (focal handling is approximate but visually close for small offsets).
-      const dx = ux - cx, dy = uy - cy
-      const d = Math.hypot(dx, dy)
-      let t = d / r
-      if (fx !== cx || fy !== cy) {
-        // Adjust by the focal-point offset along the same direction.
-        const fDx = fx - cx, fDy = fy - cy
-        const dot = dx * fDx + dy * fDy
-        const offset = d > 0 ? dot / d : 0
-        t = (d - offset) / Math.max(1e-9, r - offset)
+      // Intersect the ray F→P with the circle of radius r around C.
+      // Parametrise as Q(t) = F + t * (P - F); solve |Q - C|² = r².
+      const dx = ux - fx, dy = uy - fy
+      const a = dx * dx + dy * dy
+      if (a === 0) return evalStops(g.stops, applySpread(0, g.spreadMethod))
+      const b = dx * fxc + dy * fyc
+      const c = fxc * fxc + fyc * fyc - r2
+      const disc = b * b - a * c
+      if (disc < 0) {
+        // Shouldn't happen after clamping, but guard.
+        return evalStops(g.stops, applySpread(1, g.spreadMethod))
       }
+      // Take the positive root (forward along F→P direction).
+      const sqrtD = Math.sqrt(disc)
+      const tExit = (-b + sqrtD) / a
+      const t = tExit > 0 ? 1 / tExit : 0
       return evalStops(g.stops, applySpread(t, g.spreadMethod))
     },
   }
@@ -182,5 +184,3 @@ export function polysBBox(polys: number[][]): { x: number, y: number, width: num
   return { x: xMin, y: yMin, width: xMax - xMin, height: yMax - yMin }
 }
 
-// re-export for the renderer
-export { multiply }
