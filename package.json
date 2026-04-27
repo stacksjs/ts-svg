@@ -1,5 +1,5 @@
 {
-  "name": "ts-svg",
+  "name": "@stacksjs/ts-svg",
   "type": "module",
   "version": "0.5.0",
   "description": "Pure-TypeScript SVG parser, rasterizer, and PNG encoder for Bun/Node — drop-in `Resvg`-compatible class plus a typed element-tree API.",
