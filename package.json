@@ -78,7 +78,7 @@
     "format:fix": "bunx --bun pickier . --format --write"
   },
   "dependencies": {
-    "ts-png": "link:ts-png"
+    "@stacksjs/ts-png": "^0.1.2"
   },
   "devDependencies": {
     "@types/bun": "latest",
