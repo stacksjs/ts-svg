@@ -1,7 +1,7 @@
 {
   "name": "@stacksjs/ts-svg",
   "type": "module",
-  "version": "0.5.0",
+  "version": "0.0.0",
   "description": "Pure-TypeScript SVG parser, rasterizer, and PNG encoder for Bun/Node — drop-in `Resvg`-compatible class plus a typed element-tree API.",
   "author": "Chris Breuer <chris@stacksjs.org>",
   "license": "MIT",
@@ -69,6 +69,8 @@
     "changelog": "bunx logsmith --verbose",
     "changelog:generate": "bunx logsmith --output CHANGELOG.md",
     "release": "bun --bun run changelog:generate && bunx --bun bumpx prompt --recursive",
+    "release:patch": "bun --bun run changelog:generate && bunx --bun bumpx patch --yes --recursive",
+    "release:minor": "bun --bun run changelog:generate && bunx --bun bumpx minor --yes --recursive",
     "postinstall": "bunx git-hooks",
     "dev:docs": "bun --bun bunpress dev docs",
     "build:docs": "bun --bun bunpress build docs",
