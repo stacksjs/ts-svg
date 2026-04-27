@@ -260,6 +260,14 @@ export function arcToCubics(
 }
 
 /**
+ * Recursion guard: a 16-level subdivision is enough for any tolerance ≥
+ * UPM/2^16 ≈ 0.015 px on a 1000 UPM glyph. Pathological inputs (cusps,
+ * near-degenerate curves) that don't converge are forced to flat at this
+ * depth — a tiny visible artefact is preferable to a stack overflow.
+ */
+const MAX_FLATTEN_DEPTH = 16
+
+/**
  * Adaptive subdivision of a cubic Bezier into line segments.
  * `tolerance` is the maximum allowed sagitta (deviation) in pixels.
  */
@@ -270,7 +278,9 @@ export function flattenCubic(
   x1: number, y1: number,
   tolerance: number,
   out: number[],
+  depth = 0,
 ): void {
+  if (depth >= MAX_FLATTEN_DEPTH) { out.push(x1, y1); return }
   // Estimate flatness: max distance from control points to chord.
   const dx = x1 - x0
   const dy = y1 - y0
@@ -295,8 +305,8 @@ export function flattenCubic(
   const m123x = (m12x + m23x) / 2, m123y = (m12y + m23y) / 2
   const m234x = (m23x + m34x) / 2, m234y = (m23y + m34y) / 2
   const mx = (m123x + m234x) / 2, my = (m123y + m234y) / 2
-  flattenCubic(x0, y0, m12x, m12y, m123x, m123y, mx, my, tolerance, out)
-  flattenCubic(mx, my, m234x, m234y, m34x, m34y, x1, y1, tolerance, out)
+  flattenCubic(x0, y0, m12x, m12y, m123x, m123y, mx, my, tolerance, out, depth + 1)
+  flattenCubic(mx, my, m234x, m234y, m34x, m34y, x1, y1, tolerance, out, depth + 1)
 }
 
 /** Adaptive subdivision of a quadratic Bezier into line segments. */
@@ -306,7 +316,9 @@ export function flattenQuadratic(
   x1: number, y1: number,
   tolerance: number,
   out: number[],
+  depth = 0,
 ): void {
+  if (depth >= MAX_FLATTEN_DEPTH) { out.push(x1, y1); return }
   // Estimate flatness as the distance from control point to chord.
   const dx = x1 - x0, dy = y1 - y0
   const denom = dx * dx + dy * dy
@@ -321,8 +333,8 @@ export function flattenQuadratic(
   const m23x = (c1x + x1) / 2, m23y = (c1y + y1) / 2
   const mx = (m12x + m23x) / 2
   const my = (m12y + m23y) / 2
-  flattenQuadratic(x0, y0, m12x, m12y, mx, my, tolerance, out)
-  flattenQuadratic(mx, my, m23x, m23y, x1, y1, tolerance, out)
+  flattenQuadratic(x0, y0, m12x, m12y, mx, my, tolerance, out, depth + 1)
+  flattenQuadratic(mx, my, m23x, m23y, x1, y1, tolerance, out, depth + 1)
 }
 
 /**

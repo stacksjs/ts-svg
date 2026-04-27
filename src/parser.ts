@@ -15,13 +15,41 @@
  * children render with inherited style).
  */
 
-import type { Matrix, SVGElementNode, SVGGroup, SVGNode, SVGRoot } from './types'
+import type { Matrix, PreserveAspectRatio, SVGClipPath, SVGDefs, SVGElementNode, SVGGradient, SVGGradientStop, SVGGroup, SVGLinearGradient, SVGMask, SVGNode, SVGRadialGradient, SVGRoot } from './types'
+import { parseColor } from './color'
 import { parseTransform } from './transform'
 
+const PAR_ALIGN_VALUES = new Set([
+  'none', 'xMinYMin', 'xMidYMin', 'xMaxYMin',
+  'xMinYMid', 'xMidYMid', 'xMaxYMid',
+  'xMinYMax', 'xMidYMax', 'xMaxYMax',
+])
+
+/** Parse a `preserveAspectRatio` attribute. SVG default is "xMidYMid meet". */
+function parsePreserveAspectRatio(s: string | undefined): PreserveAspectRatio {
+  if (!s) return { align: 'xMidYMid', meetOrSlice: 'meet' }
+  const parts = s.trim().split(/\s+/)
+  const alignRaw = parts[0] ?? 'xMidYMid'
+  const align = (PAR_ALIGN_VALUES.has(alignRaw) ? alignRaw : 'xMidYMid') as PreserveAspectRatio['align']
+  const meetOrSlice = (parts[1] === 'slice' ? 'slice' : 'meet') as PreserveAspectRatio['meetOrSlice']
+  return { align, meetOrSlice }
+}
+
+type RawNode = RawElement | { tag: '#text', text: string }
 interface RawElement {
   tag: string
   attrs: Record<string, string>
-  children: RawElement[]
+  children: RawNode[]
+}
+
+function collectText(el: RawElement): string {
+  const out: string[] = []
+  for (const c of el.children) {
+    if (c.tag === '#text') out.push((c as { text: string }).text)
+    else out.push(collectText(c as RawElement))
+  }
+  // Collapse runs of whitespace per SVG xml-space=default semantics.
+  return out.join('').replace(/\s+/g, ' ').trim()
 }
 
 const SELF_CLOSING = new Set([
@@ -71,7 +99,17 @@ function parseRaw(svg: string): RawElement | null {
   let i = 0
   while (i < src.length) {
     const lt = src.indexOf('<', i)
-    if (lt < 0) break
+    if (lt < 0) {
+      // Trailing text (rare at root level — we ignore).
+      break
+    }
+    // Text between previous tag and this `<`.
+    if (lt > i && stack.length > 0) {
+      const text = decodeEntities(src.slice(i, lt))
+      if (text.length > 0) {
+        stack[stack.length - 1]!.children.push({ tag: '#text', text })
+      }
+    }
     if (src[lt + 1] === '/') {
       // closing tag
       const gt = src.indexOf('>', lt)
@@ -134,10 +172,17 @@ interface StyleAttrs {
   fill?: string | null
   stroke?: string | null
   strokeWidth?: number
+  strokeLineCap?: 'butt' | 'round' | 'square'
+  strokeLineJoin?: 'miter' | 'round' | 'bevel'
+  strokeMiterLimit?: number
+  strokeDashArray?: number[]
+  strokeDashOffset?: number
   opacity?: number
   fillOpacity?: number
   strokeOpacity?: number
   transform?: Matrix
+  clipPath?: string
+  mask?: string
 }
 
 function pickStyle(attrs: Record<string, string>): StyleAttrs {
@@ -162,10 +207,31 @@ function pickStyle(attrs: Record<string, string>): StyleAttrs {
     out.stroke = (s === 'none') ? null : s
   }
   if ('stroke-width' in attrs) out.strokeWidth = parseNumber(attrs['stroke-width'], 1)
+  if ('stroke-linecap' in attrs) {
+    const cap = attrs['stroke-linecap']!.trim()
+    if (cap === 'butt' || cap === 'round' || cap === 'square') out.strokeLineCap = cap
+  }
+  if ('stroke-linejoin' in attrs) {
+    const join = attrs['stroke-linejoin']!.trim()
+    if (join === 'miter' || join === 'round' || join === 'bevel') out.strokeLineJoin = join
+  }
+  if ('stroke-miterlimit' in attrs) out.strokeMiterLimit = parseNumber(attrs['stroke-miterlimit'], 4)
+  if ('stroke-dasharray' in attrs) {
+    const v = attrs['stroke-dasharray']!.trim()
+    if (v && v !== 'none') {
+      out.strokeDashArray = v.split(/[\s,]+/).filter(Boolean).map(Number).filter(n => Number.isFinite(n) && n >= 0)
+    }
+    else {
+      out.strokeDashArray = []
+    }
+  }
+  if ('stroke-dashoffset' in attrs) out.strokeDashOffset = parseNumber(attrs['stroke-dashoffset'], 0)
   if ('opacity' in attrs) out.opacity = parseNumber(attrs.opacity, 1)
   if ('fill-opacity' in attrs) out.fillOpacity = parseNumber(attrs['fill-opacity'], 1)
   if ('stroke-opacity' in attrs) out.strokeOpacity = parseNumber(attrs['stroke-opacity'], 1)
   if ('transform' in attrs) out.transform = parseTransform(attrs.transform!)
+  if ('clip-path' in attrs) out.clipPath = attrs['clip-path']!.trim()
+  if ('mask' in attrs) out.mask = attrs.mask!.trim()
   return out
 }
 
@@ -177,10 +243,17 @@ function buildNode(raw: RawElement, vbWidth: number, vbHeight: number): SVGNode 
     fill: style.fill,
     stroke: style.stroke,
     strokeWidth: style.strokeWidth,
+    strokeLineCap: style.strokeLineCap,
+    strokeLineJoin: style.strokeLineJoin,
+    strokeMiterLimit: style.strokeMiterLimit,
+    strokeDashArray: style.strokeDashArray,
+    strokeDashOffset: style.strokeDashOffset,
     fillOpacity: style.fillOpacity,
     strokeOpacity: style.strokeOpacity,
     opacity: style.opacity,
     transform: style.transform,
+    clipPath: style.clipPath,
+    mask: style.mask,
   }
 
   switch (raw.tag) {
@@ -191,6 +264,7 @@ function buildNode(raw: RawElement, vbWidth: number, vbHeight: number): SVGNode 
         tag: 'g',
         ...baseFields,
         children: raw.children
+          .filter((c): c is RawElement => c.tag !== '#text')
           .map(c => buildNode(c, vbWidth, vbHeight))
           .filter((c): c is SVGNode => c != null),
       }
@@ -207,15 +281,19 @@ function buildNode(raw: RawElement, vbWidth: number, vbHeight: number): SVGNode 
         : undefined
       const width = parseLengthPercent(attrs.width, vb?.width ?? vbWidth, vb?.width ?? vbWidth)
       const height = parseLengthPercent(attrs.height, vb?.height ?? vbHeight, vb?.height ?? vbHeight)
+      const par = parsePreserveAspectRatio(attrs.preserveAspectRatio)
       const root: SVGRoot = {
         tag: 'svg',
         ...baseFields,
         width,
         height,
         viewBox: vb,
+        preserveAspectRatio: par,
         children: raw.children
+          .filter((c): c is RawElement => c.tag !== '#text')
           .map(c => buildNode(c, vb?.width ?? width, vb?.height ?? height))
           .filter((c): c is SVGNode => c != null),
+        defs: { gradients: new Map(), clipPaths: new Map(), masks: new Map(), byId: new Map() },
       }
       return root
     }
@@ -269,6 +347,44 @@ function buildNode(raw: RawElement, vbWidth: number, vbHeight: number): SVGNode 
         ...baseFields,
         d: attrs.d ?? '',
       }
+    case 'text': {
+      const anchorRaw = attrs['text-anchor']
+      const anchor = anchorRaw === 'middle' ? 'middle' : anchorRaw === 'end' ? 'end' : 'start'
+      // Inner text is the concatenation of any text children (we don't
+      // honour <tspan> positioning yet; the parser flattens them).
+      const flat = collectText(raw)
+      return {
+        tag: 'text',
+        ...baseFields,
+        x: parseNumber(attrs.x),
+        y: parseNumber(attrs.y),
+        textAnchor: anchor,
+        fontFamily: attrs['font-family'] ?? attrs.fontFamily ?? 'sans-serif',
+        fontSize: parseNumber(attrs['font-size'] ?? attrs.fontSize, 16),
+        text: flat,
+      }
+    }
+    case 'use': {
+      const href = attrs.href ?? attrs['xlink:href'] ?? ''
+      return {
+        tag: 'use',
+        ...baseFields,
+        href: href.replace(/^#/, ''),
+        x: parseNumber(attrs.x),
+        y: parseNumber(attrs.y),
+        width: attrs.width != null ? parseLengthPercent(attrs.width, vbWidth, undefined as never) : undefined,
+        height: attrs.height != null ? parseLengthPercent(attrs.height, vbHeight, undefined as never) : undefined,
+      }
+    }
+    case 'linearGradient':
+    case 'radialGradient':
+    case 'clipPath':
+    case 'mask':
+    case 'pattern':
+    case 'filter':
+    case 'symbol':
+      // Captured into defs separately; not part of the render tree.
+      return null
     case 'title':
     case 'desc':
     case 'metadata':
@@ -281,12 +397,144 @@ function buildNode(raw: RawElement, vbWidth: number, vbHeight: number): SVGNode 
         tag: 'g',
         ...baseFields,
         children: raw.children
+          .filter((c): c is RawElement => c.tag !== '#text')
           .map(c => buildNode(c, vbWidth, vbHeight))
           .filter((c): c is SVGNode => c != null),
       }
       return group
     }
   }
+}
+
+/** Parse a single gradient stop element. */
+function parseGradientStop(raw: RawElement): SVGGradientStop {
+  const offsetRaw = raw.attrs.offset ?? '0'
+  let offset = offsetRaw.endsWith('%')
+    ? Number.parseFloat(offsetRaw.slice(0, -1)) / 100
+    : Number.parseFloat(offsetRaw)
+  if (!Number.isFinite(offset)) offset = 0
+  offset = Math.max(0, Math.min(1, offset))
+
+  // stop-color may come from style="stop-color: #fff; stop-opacity: 0.5".
+  let stopColor = raw.attrs['stop-color']
+  let stopOpacity: number | undefined
+  if (raw.attrs.style) {
+    for (const decl of raw.attrs.style.split(';')) {
+      const idx = decl.indexOf(':')
+      if (idx < 0) continue
+      const k = decl.slice(0, idx).trim()
+      const v = decl.slice(idx + 1).trim()
+      if (k === 'stop-color' && !stopColor) stopColor = v
+      if (k === 'stop-opacity' && stopOpacity === undefined) stopOpacity = Number.parseFloat(v)
+    }
+  }
+  if (raw.attrs['stop-opacity']) stopOpacity = Number.parseFloat(raw.attrs['stop-opacity']!)
+  const color = parseColor(stopColor ?? 'black')
+  if (stopOpacity != null && Number.isFinite(stopOpacity)) {
+    color.a = Math.round(color.a * stopOpacity)
+  }
+  return { offset, color }
+}
+
+function parseGradient(raw: RawElement): SVGGradient | null {
+  const id = raw.attrs.id
+  if (!id) return null
+  const units = raw.attrs.gradientUnits === 'userSpaceOnUse' ? 'userSpaceOnUse' : 'objectBoundingBox'
+  const spreadRaw = raw.attrs.spreadMethod
+  const spreadMethod = spreadRaw === 'reflect' || spreadRaw === 'repeat' ? spreadRaw : 'pad'
+  const transform = raw.attrs.gradientTransform ? parseTransform(raw.attrs.gradientTransform) : undefined
+  const stops: SVGGradientStop[] = raw.children
+    .filter((c): c is RawElement => c.tag === 'stop')
+    .map(parseGradientStop)
+
+  if (raw.tag === 'linearGradient') {
+    const x1 = parseLengthPercent(raw.attrs.x1, 1, 0)
+    const y1 = parseLengthPercent(raw.attrs.y1, 1, 0)
+    const x2 = parseLengthPercent(raw.attrs.x2, 1, 1)
+    const y2 = parseLengthPercent(raw.attrs.y2, 1, 0)
+    const grad: SVGLinearGradient = {
+      tag: 'linearGradient', id, x1, y1, x2, y2, units, spreadMethod, stops,
+      gradientTransform: transform, attrs: raw.attrs,
+    }
+    return grad
+  }
+  if (raw.tag === 'radialGradient') {
+    const cx = parseLengthPercent(raw.attrs.cx, 1, 0.5)
+    const cy = parseLengthPercent(raw.attrs.cy, 1, 0.5)
+    const r = parseLengthPercent(raw.attrs.r, 1, 0.5)
+    const fx = raw.attrs.fx != null ? parseLengthPercent(raw.attrs.fx, 1, cx) : cx
+    const fy = raw.attrs.fy != null ? parseLengthPercent(raw.attrs.fy, 1, cy) : cy
+    const grad: SVGRadialGradient = {
+      tag: 'radialGradient', id, cx, cy, r, fx, fy, units, spreadMethod, stops,
+      gradientTransform: transform, attrs: raw.attrs,
+    }
+    return grad
+  }
+  return null
+}
+
+/**
+ * Walk the raw tree collecting paint-server / clip / mask / id-keyed
+ * definitions. The result is consumed by the renderer to resolve
+ * `fill="url(#id)"`, `clip-path="url(#id)"`, `<use href="#id" />`, etc.
+ */
+function collectDefs(raw: RawElement, vbW: number, vbH: number): SVGDefs {
+  const defs: SVGDefs = {
+    gradients: new Map(),
+    clipPaths: new Map(),
+    masks: new Map(),
+    byId: new Map(),
+  }
+  const walk = (el: RawElement): void => {
+    if (el.tag === 'linearGradient' || el.tag === 'radialGradient') {
+      const g = parseGradient(el)
+      if (g) defs.gradients.set(g.id, g)
+    }
+    else if (el.tag === 'clipPath') {
+      const id = el.attrs.id
+      if (id) {
+        const units = el.attrs.clipPathUnits === 'objectBoundingBox' ? 'objectBoundingBox' : 'userSpaceOnUse'
+        const cp: SVGClipPath = {
+          tag: 'clipPath', id, units,
+          children: el.children
+            .filter((c): c is RawElement => c.tag !== '#text')
+            .map(c => buildNode(c, vbW, vbH))
+            .filter((c): c is SVGNode => c != null),
+          attrs: el.attrs,
+        }
+        defs.clipPaths.set(id, cp)
+      }
+    }
+    else if (el.tag === 'mask') {
+      const id = el.attrs.id
+      if (id) {
+        const units = el.attrs.maskUnits === 'objectBoundingBox' ? 'objectBoundingBox' : 'userSpaceOnUse'
+        const contentUnits = el.attrs.maskContentUnits === 'objectBoundingBox' ? 'objectBoundingBox' : 'userSpaceOnUse'
+        const mk: SVGMask = {
+          tag: 'mask', id, units, contentUnits,
+          x: el.attrs.x != null ? parseLengthPercent(el.attrs.x, vbW, 0) : undefined,
+          y: el.attrs.y != null ? parseLengthPercent(el.attrs.y, vbH, 0) : undefined,
+          width: el.attrs.width != null ? parseLengthPercent(el.attrs.width, vbW, vbW) : undefined,
+          height: el.attrs.height != null ? parseLengthPercent(el.attrs.height, vbH, vbH) : undefined,
+          children: el.children
+            .filter((c): c is RawElement => c.tag !== '#text')
+            .map(c => buildNode(c, vbW, vbH))
+            .filter((c): c is SVGNode => c != null),
+          attrs: el.attrs,
+        }
+        defs.masks.set(id, mk)
+      }
+    }
+    else if (el.attrs.id) {
+      const node = buildNode(el, vbW, vbH)
+      if (node) defs.byId.set(el.attrs.id, node)
+    }
+    for (const c of el.children) {
+      if (c.tag !== '#text') walk(c as RawElement)
+    }
+  }
+  walk(raw)
+  return defs
 }
 
 /**
@@ -302,6 +550,10 @@ export function parseSVG(svg: string): SVGRoot {
   // Initial fallback dims (before we know viewBox/width); the SVG node
   // resolves its own from attributes.
   const result = buildNode(raw, 1000, 1000) as SVGRoot
+  // Collect defs (gradients/clipPaths/masks/byId) over the full raw tree.
+  const vbW = result.viewBox?.width ?? result.width
+  const vbH = result.viewBox?.height ?? result.height
+  result.defs = collectDefs(raw, vbW, vbH)
   return result
 }
 
