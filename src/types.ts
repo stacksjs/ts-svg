@@ -9,6 +9,11 @@
 
 export type StrokeLineCap = 'butt' | 'round' | 'square'
 export type StrokeLineJoin = 'miter' | 'round' | 'bevel'
+export type FillRule = 'nonzero' | 'evenodd'
+
+/** SVG 2 paint-order: which of fill / stroke / markers paints first.
+ * The list is the rendering order (first → last). */
+export type PaintOrder = ReadonlyArray<'fill' | 'stroke' | 'markers'>
 
 export interface BaseNode {
   attrs: Record<string, string>
@@ -34,6 +39,12 @@ export interface BaseNode {
   clipPath?: string
   /** mask attribute (e.g. `url(#myMask)`). */
   mask?: string
+  /** Fill rule (default `nonzero`). */
+  fillRule?: FillRule
+  /** SVG 2 paint-order — defaults to `['fill', 'stroke', 'markers']`. */
+  paintOrder?: PaintOrder
+  /** vector-effect="non-scaling-stroke" → stroke width is device-pixel-fixed. */
+  vectorEffect?: 'none' | 'non-scaling-stroke'
 }
 
 /**
@@ -52,6 +63,9 @@ export interface SVGRoot extends BaseNode {
   tag: 'svg'
   width: number
   height: number
+  /** Inner-SVG positional offset (always 0 for the outermost `<svg>`). */
+  x: number
+  y: number
   viewBox?: { x: number, y: number, width: number, height: number }
   /** Defaults to `xMidYMid meet` per SVG spec. */
   preserveAspectRatio: PreserveAspectRatio
@@ -185,6 +199,33 @@ export interface SVGUse extends BaseNode {
   height?: number
 }
 
+/**
+ * Raster `<image>` element. We don't decode image bytes inside ts-svg —
+ * the consumer is responsible for handing back RGBA via `imageResolver`.
+ * If unresolved, the element draws a transparent placeholder of the right
+ * size (so layout remains stable).
+ */
+export interface SVGImage extends BaseNode {
+  tag: 'image'
+  href: string
+  x: number
+  y: number
+  width: number
+  height: number
+  preserveAspectRatio: PreserveAspectRatio
+}
+
+/** Decoded image data the renderer can sample. */
+export interface ResolvedImage {
+  width: number
+  height: number
+  /** RGBA bytes, row-major, top-to-bottom. */
+  data: Uint8Array
+}
+
+// eslint-disable-next-line pickier/no-unused-vars
+export type ImageResolver = (href: string) => ResolvedImage | null
+
 /** A registry of `id`-bearing definitions found while parsing. */
 export interface SVGDefs {
   gradients: Map<string, SVGGradient>
@@ -194,7 +235,7 @@ export interface SVGDefs {
   byId: Map<string, SVGNode>
 }
 
-export type SVGElementNode = SVGRect | SVGCircle | SVGEllipse | SVGLine | SVGPolygon | SVGPath | SVGText | SVGUse
+export type SVGElementNode = SVGRect | SVGCircle | SVGEllipse | SVGLine | SVGPolygon | SVGPath | SVGText | SVGUse | SVGImage
 export type SVGNode = SVGRoot | SVGGroup | SVGElementNode
 
 /**
@@ -206,9 +247,15 @@ export type SVGNode = SVGRoot | SVGGroup | SVGElementNode
  *     OR a Path-like object with a `toPathData()` method.
  *   - `getAdvanceWidth(text, fontSize)` → number, for text-anchor alignment.
  */
+/** Options forwarded to `ResolvedFont.getPath` / `getAdvanceWidth`. */
+export interface ResolvedFontOptions {
+  features?: Record<string, boolean>
+  kerning?: boolean
+}
+
 export interface ResolvedFont {
-  getPath: (text: string, x: number, y: number, fontSize: number) => { toPathData: (decimals?: number) => string }
-  getAdvanceWidth: (text: string, fontSize: number) => number
+  getPath: (text: string, x: number, y: number, fontSize: number, options?: ResolvedFontOptions) => { toPathData: (decimals?: number) => string }
+  getAdvanceWidth: (text: string, fontSize: number, options?: ResolvedFontOptions) => number
 }
 
 // eslint-disable-next-line pickier/no-unused-vars

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'bun:test'
-import png from '@stacksjs/ts-png'
-import { BLACK, parseColor, parseSVG, Resvg, TRANSPARENT } from '../src'
+import png from 'ts-png'
+import { BLACK, parseColor, parsePath, parseSVG, Resvg, TRANSPARENT } from '../src'
 
 interface Pixel { r: number, g: number, b: number, a: number }
 
@@ -171,6 +171,218 @@ describe('parseLengthPercent honours common units', () => {
   it('width="1in" parses as 96 user units', () => {
     const root = parseSVG('<svg xmlns="http://www.w3.org/2000/svg" width="1in" height="1in"/>')
     expect(root.width).toBe(96)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Audit-driven regression tests (bugs 1-19 + #27-30)
+// ---------------------------------------------------------------------------
+
+describe('parsePath state isolation', () => {
+  it('two consecutive calls on the same source produce identical output', () => {
+    const d = 'M0 0 L10 0 L10 10 Z'
+    const a = JSON.stringify(parsePath(d))
+    const b = JSON.stringify(parsePath(d))
+    expect(a).toBe(b)
+  })
+
+  it('compact arc flags `00` parse as TWO 0-flags, not a single number `0`', () => {
+    const cmds = parsePath('M0 0 A1 1 0 00 5 5')
+    expect(cmds).toHaveLength(2)
+    const arc = cmds[1] as Extract<ReturnType<typeof parsePath>[number], { t: 'A' }>
+    expect(arc.t).toBe('A')
+    expect(arc.largeArc).toBe(false)
+    expect(arc.sweep).toBe(false)
+    expect(arc.x).toBe(5)
+    expect(arc.y).toBe(5)
+  })
+
+  it('arc flags reject non-binary digits', () => {
+    expect(() => parsePath('M0 0 A1 1 0 5 7 50 50')).toThrow()
+  })
+
+  it('unknown command throws (rather than silently swallowing operands)', () => {
+    expect(() => parsePath('M0 0 X 1 2')).toThrow()
+  })
+})
+
+describe('parseColor: hex edge cases', () => {
+  it('rejects hex length 5 (returns transparent, not opaque black)', () => {
+    expect(parseColor('#abcde')).toEqual({ r: 0, g: 0, b: 0, a: 0 })
+  })
+
+  it('rejects hex length 7', () => {
+    expect(parseColor('#abcdef0')).toEqual({ r: 0, g: 0, b: 0, a: 0 })
+  })
+
+  it('rejects non-hex characters', () => {
+    expect(parseColor('#gghhii')).toEqual({ r: 0, g: 0, b: 0, a: 0 })
+  })
+
+  it('accepts uppercase hex', () => {
+    expect(parseColor('#FF8800')).toEqual({ r: 255, g: 136, b: 0, a: 255 })
+  })
+})
+
+describe('parseColor: HSL never returns NaN', () => {
+  it('rejects NaN hue without polluting the framebuffer', () => {
+    const c = parseColor('hsl(notanumber, 50%, 50%)')
+    expect(Number.isFinite(c.r) && Number.isFinite(c.g) && Number.isFinite(c.b) && Number.isFinite(c.a)).toBe(true)
+    expect(c.a).toBe(0)
+  })
+
+  it('handles negative hue via mod 360', () => {
+    const c = parseColor('hsl(-90, 100%, 50%)')
+    expect(Number.isFinite(c.r) && Number.isFinite(c.g) && Number.isFinite(c.b)).toBe(true)
+  })
+})
+
+describe('clipPath with objectBoundingBox units', () => {
+  it('renders clip rect scaled into target bounds', () => {
+    const SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100" viewBox="0 0 100 100">
+      <defs>
+        <clipPath id="c" clipPathUnits="objectBoundingBox">
+          <rect x="0.25" y="0.25" width="0.5" height="0.5"/>
+        </clipPath>
+      </defs>
+      <rect width="100" height="100" fill="white"/>
+      <rect x="0" y="0" width="100" height="100" fill="black" clip-path="url(#c)"/>
+    </svg>`
+    const buf = render(SVG)
+    const center = pixelAt(buf, 50, 50)
+    expect(center.r).toBeLessThan(40) // inside clip → black
+    const corner = pixelAt(buf, 5, 5)
+    expect(corner.r).toBeGreaterThan(240) // outside clip → white
+  })
+})
+
+describe('chained <use> references', () => {
+  it('use → group → use → primitive renders both nested instances', () => {
+    const SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="100" height="60" viewBox="0 0 100 60">
+      <defs>
+        <rect id="dot" width="20" height="20" fill="red"/>
+        <g id="row"><use href="#dot" x="0" y="0"/><use href="#dot" x="40" y="0"/></g>
+      </defs>
+      <rect width="100" height="60" fill="white"/>
+      <use href="#row" x="10" y="10"/>
+    </svg>`
+    const buf = render(SVG)
+    expect(pixelAt(buf, 15, 15).r).toBeGreaterThan(200)
+    expect(pixelAt(buf, 55, 15).r).toBeGreaterThan(200)
+  })
+})
+
+describe('parseSVG accepts binary input', () => {
+  it('decodes UTF-8 Uint8Array', () => {
+    const bytes = new TextEncoder().encode('<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"></svg>')
+    const root = parseSVG(bytes)
+    expect(root.tag).toBe('svg')
+    expect(root.width).toBe(10)
+  })
+
+  it('decodes ArrayBuffer', () => {
+    const bytes = new TextEncoder().encode('<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"></svg>')
+    const root = parseSVG(bytes.buffer as ArrayBuffer)
+    expect(root.tag).toBe('svg')
+  })
+})
+
+describe('fill-rule: evenodd', () => {
+  it('renders a donut (cut-out hole) when set', () => {
+    const SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="60" height="60" viewBox="0 0 60 60">
+      <rect width="60" height="60" fill="white"/>
+      <path d="M5 5 L55 5 L55 55 L5 55 Z M20 20 L40 20 L40 40 L20 40 Z" fill="black" fill-rule="evenodd"/>
+    </svg>`
+    const buf = render(SVG)
+    expect(pixelAt(buf, 30, 30).r).toBeGreaterThan(240) // hole → white
+    expect(pixelAt(buf, 10, 10).r).toBeLessThan(40) // ring → black
+  })
+})
+
+describe('paint-order', () => {
+  it('with `paint-order: stroke fill`, fill paints over stroke', () => {
+    const SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="60" height="60" viewBox="0 0 60 60">
+      <rect width="60" height="60" fill="white"/>
+      <rect x="20" y="20" width="20" height="20" fill="red" stroke="black" stroke-width="6" paint-order="stroke fill"/>
+    </svg>`
+    const buf = render(SVG)
+    // Pixel just inside the bbox should be RED (fill over stroke).
+    expect(pixelAt(buf, 23, 30).r).toBeGreaterThan(200)
+  })
+})
+
+describe('vector-effect: non-scaling-stroke', () => {
+  it('keeps stroke width constant under transform', () => {
+    const SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100" viewBox="0 0 50 50">
+      <rect width="100" height="100" fill="white"/>
+      <line x1="10" y1="25" x2="40" y2="25" stroke="black" stroke-width="2" vector-effect="non-scaling-stroke"/>
+    </svg>`
+    const buf = render(SVG)
+    // The viewBox→viewport scale is 2x. Without non-scaling-stroke, the
+    // stroke would render at 4 device pixels; with it, ~2 device pixels.
+    // Sample a column at x=50 (centre); count black pixels vertically.
+    const d = png.sync.read(buf)
+    let blackCount = 0
+    for (let py = 0; py < d.height; py++) {
+      const idx = (py * d.width + 50) * 4
+      if (d.data[idx]! < 100) blackCount++
+    }
+    expect(blackCount).toBeLessThanOrEqual(4) // exactly ~2 px (allow AA halo)
+  })
+})
+
+describe('xml:space="preserve"', () => {
+  it('keeps internal whitespace verbatim', () => {
+    const root = parseSVG(`<svg xmlns="http://www.w3.org/2000/svg" width="50" height="50"><text xml:space="preserve">  hello   world  </text></svg>`)
+    const text = (root.children[0] as { text: string }).text
+    expect(text).toBe('  hello   world  ')
+  })
+
+  it('default space collapses runs', () => {
+    const root = parseSVG(`<svg xmlns="http://www.w3.org/2000/svg" width="50" height="50"><text>  hello   world  </text></svg>`)
+    const text = (root.children[0] as { text: string }).text
+    expect(text).toBe('hello world')
+  })
+})
+
+describe('<style> CSS rules cascade onto matching elements', () => {
+  it('class selector applies to <rect class>', () => {
+    const SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="50" height="50" viewBox="0 0 50 50">
+      <style>.box { fill: red; }</style>
+      <rect width="50" height="50" fill="white"/>
+      <rect class="box" x="10" y="10" width="30" height="30"/>
+    </svg>`
+    const buf = render(SVG)
+    expect(pixelAt(buf, 25, 25).r).toBeGreaterThan(200)
+  })
+
+  it('inline style attribute beats stylesheet rule', () => {
+    const SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="50" height="50" viewBox="0 0 50 50">
+      <style>.box { fill: red; }</style>
+      <rect width="50" height="50" fill="white"/>
+      <rect class="box" x="10" y="10" width="30" height="30" style="fill: blue"/>
+    </svg>`
+    const buf = render(SVG)
+    expect(pixelAt(buf, 25, 25).b).toBeGreaterThan(200)
+    expect(pixelAt(buf, 25, 25).r).toBeLessThan(40)
+  })
+})
+
+describe('stroke-width validation', () => {
+  it('negative stroke-width clamps to 0 (no inverted-normal artefacts)', () => {
+    const SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="60" height="60" viewBox="0 0 60 60">
+      <rect width="60" height="60" fill="white"/>
+      <rect x="20" y="20" width="20" height="20" fill="none" stroke="black" stroke-width="-5"/>
+    </svg>`
+    expect(() => render(SVG)).not.toThrow()
+  })
+})
+
+describe('stroke-dasharray: zero/negative rejection', () => {
+  it('all-zero dash array renders as solid stroke', () => {
+    const root = parseSVG(`<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20"><line x1="0" y1="10" x2="20" y2="10" stroke="black" stroke-dasharray="0 0"/></svg>`)
+    const line = root.children[0] as { strokeDashArray?: number[] }
+    expect(line.strokeDashArray ?? []).toHaveLength(0)
   })
 })
 

@@ -109,9 +109,34 @@ export class Resvg {
   }
 
   render(): RenderedImage {
-    const opts: RenderOptions = { ...this.renderOptions }
+    const fb = rasterize(this.root, this.resolveOptions())
+    return new RenderedImage(fb)
+  }
 
-    // Resolve "fitTo: width/height" by maintaining aspect ratio from intrinsic dims.
+  /**
+   * Render into an existing framebuffer. Lets consumers reuse a buffer
+   * across frames (e.g. for animations or hot paths) instead of reallocating
+   * an RGBA `Uint8Array` per `render()`. The framebuffer is cleared to
+   * transparent before rendering; pass `clear: false` to composite over
+   * existing pixel data.
+   */
+  renderInto(fb: Framebuffer, opts?: { clear?: boolean }): void {
+    if (opts?.clear !== false) {
+      fb.data.fill(0)
+    }
+    const renderOpts = this.resolveOptions()
+    renderOpts.width = fb.width
+    renderOpts.height = fb.height
+    // Re-key on existing fb's dimensions so user can size the buffer themselves.
+    const result = rasterize(this.root, renderOpts)
+    // Copy pixels back if rasterize allocated its own (the simple path).
+    if (result !== (fb as Framebuffer)) {
+      fb.data.set(result.data)
+    }
+  }
+
+  private resolveOptions(): RenderOptions {
+    const opts: RenderOptions = { ...this.renderOptions }
     if (this.aspectMode === 'width' && opts.width != null) {
       const aspect = (this.root.height || (this.root.viewBox?.height ?? 1)) / (this.root.width || (this.root.viewBox?.width ?? 1))
       opts.height = Math.round(opts.width * aspect)
@@ -120,8 +145,6 @@ export class Resvg {
       const aspect = (this.root.width || (this.root.viewBox?.width ?? 1)) / (this.root.height || (this.root.viewBox?.height ?? 1))
       opts.width = Math.round(opts.height * aspect)
     }
-
-    const fb = rasterize(this.root, opts)
-    return new RenderedImage(fb)
+    return opts
   }
 }

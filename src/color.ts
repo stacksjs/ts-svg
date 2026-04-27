@@ -69,6 +69,10 @@ const NAMED: Record<string, [number, number, number]> = {
   yellowgreen: [154, 205, 50],
 }
 
+/** Pre-built Map for O(1) lookup. Object property access is fast in V8 too,
+ *  but `Map.get` is consistently slightly faster and gives stable timings. */
+const NAMED_MAP = new Map<string, [number, number, number]>(Object.entries(NAMED))
+
 function clamp255(n: number): number { return Math.max(0, Math.min(255, Math.round(n))) }
 
 function hslToRgb(h: number, s: number, l: number): [number, number, number] {
@@ -102,6 +106,13 @@ export function parseColor(input: string | null | undefined, currentColor?: RGBA
 
   if (s.startsWith('#')) {
     const hex = s.slice(1)
+    // CSS Color spec: only 3, 4, 6, 8 hex-digit forms are valid. Anything
+    // else (e.g. `#abcde`) is invalid and resolves to transparent — NOT to
+    // black, which silently masks user errors.
+    if (hex.length !== 3 && hex.length !== 4 && hex.length !== 6 && hex.length !== 8) {
+      return { ...TRANSPARENT }
+    }
+    if (!/^[0-9a-f]+$/.test(hex)) return { ...TRANSPARENT }
     let r = 0, g = 0, b = 0, a = 255
     if (hex.length === 3 || hex.length === 4) {
       r = Number.parseInt(hex[0]! + hex[0], 16)
@@ -109,7 +120,7 @@ export function parseColor(input: string | null | undefined, currentColor?: RGBA
       b = Number.parseInt(hex[2]! + hex[2], 16)
       if (hex.length === 4) a = Number.parseInt(hex[3]! + hex[3], 16)
     }
-    else if (hex.length === 6 || hex.length === 8) {
+    else {
       r = Number.parseInt(hex.slice(0, 2), 16)
       g = Number.parseInt(hex.slice(2, 4), 16)
       b = Number.parseInt(hex.slice(4, 6), 16)
@@ -138,22 +149,27 @@ export function parseColor(input: string | null | undefined, currentColor?: RGBA
   const hslm = s.match(/^hsla?\s*\(([^)]+)\)$/)
   if (hslm) {
     const parts = hslm[1]!.split(/[\s,/]+/).filter(Boolean)
-    const h = Number.parseFloat(parts[0] ?? '0') % 360
-    const sV = Number.parseFloat((parts[1] ?? '0').replace('%', '')) / 100
-    const l = Number.parseFloat((parts[2] ?? '0').replace('%', '')) / 100
+    const hRaw = Number.parseFloat(parts[0] ?? '0')
+    const sRaw = Number.parseFloat((parts[1] ?? '0').replace('%', '')) / 100
+    const lRaw = Number.parseFloat((parts[2] ?? '0').replace('%', '')) / 100
+    // Reject any NaN component before doing arithmetic — NaN propagates
+    // silently through `Math.cos`/`% 360` and ends up baking NaN bytes into
+    // the framebuffer, where they dim the image and corrupt blends.
+    if (!Number.isFinite(hRaw) || !Number.isFinite(sRaw) || !Number.isFinite(lRaw)) {
+      return { ...TRANSPARENT }
+    }
     const a = parts.length >= 4
       ? (parts[3]!.endsWith('%')
           ? Number.parseFloat(parts[3]!.slice(0, -1)) / 100
           : Number.parseFloat(parts[3]!)) * 255
       : 255
-    const [r, g, b] = hslToRgb((h + 360) % 360, Math.max(0, Math.min(1, sV)), Math.max(0, Math.min(1, l)))
-    return { r: clamp255(r), g: clamp255(g), b: clamp255(b), a: clamp255(a) }
+    const h = ((hRaw % 360) + 360) % 360
+    const [r, g, b] = hslToRgb(h, Math.max(0, Math.min(1, sRaw)), Math.max(0, Math.min(1, lRaw)))
+    return { r: clamp255(r), g: clamp255(g), b: clamp255(b), a: clamp255(Number.isFinite(a) ? a : 255) }
   }
 
-  if (s in NAMED) {
-    const [r, g, b] = NAMED[s]!
-    return { r, g, b, a: 255 }
-  }
+  const named = NAMED_MAP.get(s)
+  if (named) return { r: named[0], g: named[1], b: named[2], a: 255 }
 
   return { ...TRANSPARENT }
 }

@@ -3,7 +3,7 @@
  * rasterise into an RGBA framebuffer.
  */
 
-import type { BaseNode, FontResolver, Matrix, RGBA, SVGDefs, SVGElementNode, SVGNode, SVGPath, SVGPolygon, SVGRect, SVGRoot, SVGText, SVGUse } from './types'
+import type { BaseNode, FontResolver, ImageResolver, Matrix, RGBA, SVGDefs, SVGElementNode, SVGImage, SVGNode, SVGPath, SVGPolygon, SVGRect, SVGRoot, SVGText, SVGUse } from './types'
 import { config } from './config'
 import { BLACK, parseColor } from './color'
 import { buildGradientPaint, parseUrlRef, polysBBox, type PaintContext } from './paint'
@@ -24,6 +24,8 @@ export interface RenderOptions {
   tolerance?: number
   /** Resolves `<text>` elements to a font. If unset, text is skipped. */
   fontResolver?: FontResolver
+  /** Resolves `<image href=>` to RGBA pixel data. If unset, images are skipped. */
+  imageResolver?: ImageResolver
   /** Resolves `currentColor` references. Defaults to the value from svg.config.ts. */
   currentColor?: string | RGBA
   /** Maximum recursion depth for `<use>`. Defaults to the value from svg.config.ts. */
@@ -36,6 +38,7 @@ interface RenderCtx {
   rootTransform: Matrix
   tolerance: number
   fontResolver?: FontResolver
+  imageResolver?: ImageResolver
   defs: SVGDefs
   currentColor: RGBA
   maxUseDepth: number
@@ -50,23 +53,24 @@ interface RenderCtx {
  * honouring its `preserveAspectRatio`.
  */
 function nestedSvgTransform(node: SVGRoot): Matrix {
+  const ox = node.x ?? 0
+  const oy = node.y ?? 0
   const vb = node.viewBox
-  if (!vb) return IDENTITY
-  // Nested <svg> doesn't carry its own x/y in our parsed type yet; treat as 0.
+  if (!vb) return [1, 0, 0, 1, ox, oy]
   const vpW = node.width || vb.width
   const vpH = node.height || vb.height
   const sxRaw = vpW / vb.width
   const syRaw = vpH / vb.height
   const par = node.preserveAspectRatio
   if (par.align === 'none') {
-    return [sxRaw, 0, 0, syRaw, -vb.x * sxRaw, -vb.y * syRaw]
+    return [sxRaw, 0, 0, syRaw, ox - vb.x * sxRaw, oy - vb.y * syRaw]
   }
   const scaleU = par.meetOrSlice === 'slice' ? Math.max(sxRaw, syRaw) : Math.min(sxRaw, syRaw)
   const slackX = vpW - vb.width * scaleU
   const slackY = vpH - vb.height * scaleU
   const xAlign = par.align.startsWith('xMin') ? 0 : par.align.startsWith('xMax') ? 1 : 0.5
   const yAlign = par.align.includes('YMin') ? 0 : par.align.includes('YMax') ? 1 : 0.5
-  return [scaleU, 0, 0, scaleU, slackX * xAlign - vb.x * scaleU, slackY * yAlign - vb.y * scaleU]
+  return [scaleU, 0, 0, scaleU, ox + slackX * xAlign - vb.x * scaleU, oy + slackY * yAlign - vb.y * scaleU]
 }
 
 interface InheritedStyle {
@@ -91,6 +95,9 @@ interface InheritedStyle {
   currentColor: RGBA
   /** Active `<use>` recursion depth — bumped per `<use>` resolution. */
   useDepth: number
+  fillRule: 'nonzero' | 'evenodd'
+  paintOrder: ReadonlyArray<'fill' | 'stroke' | 'markers'>
+  vectorEffect: 'none' | 'non-scaling-stroke'
 }
 
 function inheritStyle(parent: InheritedStyle, node: BaseNode): InheritedStyle {
@@ -120,6 +127,9 @@ function inheritStyle(parent: InheritedStyle, node: BaseNode): InheritedStyle {
   if (node.transform) out.transform = multiply(parent.transform, node.transform)
   if (node.clipPath !== undefined) out.clipPath = node.clipPath
   if (node.mask !== undefined) out.mask = node.mask
+  if (node.fillRule) out.fillRule = node.fillRule
+  if (node.paintOrder) out.paintOrder = node.paintOrder
+  if (node.vectorEffect) out.vectorEffect = node.vectorEffect
   return out
 }
 
@@ -138,10 +148,17 @@ function effectiveStroke(s: InheritedStyle): { color: RGBA, width: number } | nu
   return { color: { ...s.stroke, a }, width: s.strokeWidth }
 }
 
-/** Apply a 2x3 transform to a flat polygon `[x0, y0, x1, y1, ...]`. */
+/** Apply a 2x3 transform to a flat polygon `[x0, y0, x1, y1, ...]`.
+ *
+ * Returns a plain `number[]` because downstream consumers (rasterizer,
+ * stroke pipeline) iterate via `[i]` indexing — both `Array` and
+ * `Float64Array` support that, but the rasterizer's `Map<number, …>` keys
+ * and edge-table arithmetic are slightly faster on regular arrays in V8.
+ * Keeping `number[]` avoids hot-path conversions while still benefiting
+ * from a single pre-sized allocation. */
 function transformPoly(poly: number[], m: Matrix): number[] {
   const n = poly.length
-  const out = new Array<number>(n)
+  const out: number[] = Array.from({ length: n })
   const a = m[0], b = m[1], c = m[2], d = m[3], tx = m[4], ty = m[5]
   for (let i = 0; i < n; i += 2) {
     const x = poly[i]!, y = poly[i + 1]!
@@ -196,10 +213,19 @@ function rectToPolys(r: SVGRect, tolerance: number): number[][] {
 }
 
 function ellipseToPolys(cx: number, cy: number, rx: number, ry: number, tolerance: number): number[][] {
-  // Approximate as a polygon with enough points to keep error below tolerance.
-  // For a circle of radius r, n segments give max sagitta r*(1 - cos(pi/n)).
+  if (rx <= 0 || ry <= 0) return []
+  // For a circle of radius r, n equal-arc segments give max sagitta
+  // r * (1 − cos(π/n)). Solve for n at the requested tolerance.
+  // Clamp the acos arg to (-1, 1) — if `tolerance` exceeds the radius the
+  // ratio goes negative or above 1 and acos returns NaN.
   const r = Math.max(rx, ry)
-  const n = Math.max(16, Math.ceil(Math.PI / Math.acos(1 - tolerance / r)))
+  const arg = Math.max(-1, Math.min(1, 1 - tolerance / r))
+  const denom = Math.acos(arg)
+  // For very flat tolerance vs radius, denom approaches 0 and n explodes —
+  // cap at 4096 segments which is well past visual perfection.
+  const n = denom > 0
+    ? Math.max(16, Math.min(4096, Math.ceil(Math.PI / denom)))
+    : 16
   const pts: number[] = []
   for (let i = 0; i < n; i++) {
     const a = (i / n) * 2 * Math.PI
@@ -230,12 +256,13 @@ function textToPolys(node: SVGText, tolerance: number, resolver: FontResolver | 
   if (!resolver || node.text.length === 0) return []
   const font = resolver(node.fontFamily, node.fontSize)
   if (!font) return []
-  // Compute the anchor offset from the alignment.
-  const advance = font.getAdvanceWidth(node.text, node.fontSize)
+  // Pass the same shaping options to BOTH calls — if the font applies liga
+  // in `getPath` but a different default in `getAdvanceWidth`, the textAnchor
+  // offset would drift left/right of the actual glyph run.
+  const fontOpts: { features: { liga: true, kern: true } } = { features: { liga: true, kern: true } }
+  const advance = font.getAdvanceWidth(node.text, node.fontSize, fontOpts)
   const offset = node.textAnchor === 'middle' ? -advance / 2 : node.textAnchor === 'end' ? -advance : 0
-  // ts-fonts' getPath uses (x, y, fontSize) in user space; SVG text baseline
-  // is the Y attribute, which matches ts-fonts' getPath baseline directly.
-  const path = font.getPath(node.text, node.x + offset, node.y, node.fontSize)
+  const path = font.getPath(node.text, node.x + offset, node.y, node.fontSize, fontOpts)
   const cmds = parsePath(path.toPathData(3))
   return flattenCommands(cmds, tolerance).map(c => c.points)
 }
@@ -252,6 +279,7 @@ function shapeToPolys(node: SVGElementNode, tolerance: number, resolver: FontRes
     case 'path': return pathToPolys(node, tolerance)
     case 'text': return textToPolys(node, tolerance, resolver)
     case 'use': return [] // resolved at the renderNode level
+    case 'image': return [] // sampled directly by drawImage
   }
 }
 
@@ -412,6 +440,13 @@ function renderNode(node: SVGNode, parentStyle: InheritedStyle, ctx: RenderCtx):
     return
   }
 
+  // <image>: bypass the polygon pipeline; sample the resolved RGBA buffer
+  // straight into the framebuffer with the appropriate transform.
+  if (node.tag === 'image') {
+    drawImage(node as SVGImage, style, ctx)
+    return
+  }
+
   // Shape element: handle clip / mask the same way (offscreen if either is set).
   const clipId = parseUrlRef(style.clipPath ?? null)
   const maskId = parseUrlRef(style.mask ?? null)
@@ -423,6 +458,97 @@ function renderNode(node: SVGNode, parentStyle: InheritedStyle, ctx: RenderCtx):
   drawShape(node, style, ctx)
 }
 
+/**
+ * Sample a resolved bitmap into the framebuffer, applying the element's
+ * transform and `preserveAspectRatio`. Bilinear sampling for quality.
+ */
+function drawImage(node: SVGImage, style: InheritedStyle, ctx: RenderCtx): void {
+  if (!ctx.imageResolver) return
+  const img = ctx.imageResolver(node.href)
+  if (!img || node.width <= 0 || node.height <= 0) return
+
+  const finalT = multiply(ctx.rootTransform, style.transform)
+  const inv = invertMatrix(finalT)
+  if (!inv) return
+
+  // Determine the sub-rect of (node.x..node.x+w, node.y..node.y+h) into which
+  // the image is drawn, honouring preserveAspectRatio.
+  let dx = node.x, dy = node.y, dw = node.width, dh = node.height
+  const par = node.preserveAspectRatio
+  if (par.align !== 'none' && img.width > 0 && img.height > 0) {
+    const srcAspect = img.width / img.height
+    const dstAspect = node.width / node.height
+    const slice = par.meetOrSlice === 'slice'
+    const adjustWidth = slice ? srcAspect > dstAspect : srcAspect < dstAspect
+    if (adjustWidth) {
+      const newW = node.height * srcAspect
+      const slack = node.width - newW
+      const xAlign = par.align.startsWith('xMin') ? 0 : par.align.startsWith('xMax') ? 1 : 0.5
+      dw = newW
+      dx = node.x + slack * xAlign
+    }
+    else {
+      const newH = node.width / srcAspect
+      const slack = node.height - newH
+      const yAlign = par.align.includes('YMin') ? 0 : par.align.includes('YMax') ? 1 : 0.5
+      dh = newH
+      dy = node.y + slack * yAlign
+    }
+  }
+
+  // Walk the device-pixel bbox of the destination rect and sample the source.
+  const corners: Array<[number, number]> = [
+    [dx, dy], [dx + dw, dy], [dx + dw, dy + dh], [dx, dy + dh],
+  ]
+  let minPx = Infinity, minPy = Infinity, maxPx = -Infinity, maxPy = -Infinity
+  for (const [x, y] of corners) {
+    const px = finalT[0] * x + finalT[2] * y + finalT[4]
+    const py = finalT[1] * x + finalT[3] * y + finalT[5]
+    if (px < minPx) minPx = px; if (px > maxPx) maxPx = px
+    if (py < minPy) minPy = py; if (py > maxPy) maxPy = py
+  }
+  const x0 = Math.max(0, Math.floor(minPx))
+  const x1 = Math.min(ctx.fb.width - 1, Math.ceil(maxPx))
+  const y0 = Math.max(0, Math.floor(minPy))
+  const y1 = Math.min(ctx.fb.height - 1, Math.ceil(maxPy))
+  const opacity = style.opacity * style.fillOpacity
+
+  for (let py = y0; py <= y1; py++) {
+    for (let px = x0; px <= x1; px++) {
+      const cx = px + 0.5, cy = py + 0.5
+      const ux = inv[0] * cx + inv[2] * cy + inv[4]
+      const uy = inv[1] * cx + inv[3] * cy + inv[5]
+      if (ux < dx || ux >= dx + dw || uy < dy || uy >= dy + dh) continue
+      // Map dest-rect coord into source pixel coord (bilinear).
+      const fx = ((ux - dx) / dw) * (img.width - 1)
+      const fy = ((uy - dy) / dh) * (img.height - 1)
+      const ix = Math.max(0, Math.min(img.width - 2, Math.floor(fx)))
+      const iy = Math.max(0, Math.min(img.height - 2, Math.floor(fy)))
+      const tx = fx - ix, ty = fy - iy
+      const blend = (channel: 0 | 1 | 2 | 3): number => {
+        const i00 = (iy * img.width + ix) * 4 + channel
+        const i10 = (iy * img.width + ix + 1) * 4 + channel
+        const i01 = ((iy + 1) * img.width + ix) * 4 + channel
+        const i11 = ((iy + 1) * img.width + ix + 1) * 4 + channel
+        const a = img.data[i00]! * (1 - tx) + img.data[i10]! * tx
+        const b = img.data[i01]! * (1 - tx) + img.data[i11]! * tx
+        return a * (1 - ty) + b * ty
+      }
+      const r = blend(0), g = blend(1), b = blend(2), a = blend(3) * opacity
+      // Composite over destination
+      const dstIdx = (py * ctx.fb.width + px) * 4
+      const srcA = a / 255
+      const dstA = ctx.fb.data[dstIdx + 3]! / 255
+      const outA = srcA + dstA * (1 - srcA)
+      if (outA <= 0) continue
+      ctx.fb.data[dstIdx]     = Math.round((r * srcA + ctx.fb.data[dstIdx]!     * dstA * (1 - srcA)) / outA)
+      ctx.fb.data[dstIdx + 1] = Math.round((g * srcA + ctx.fb.data[dstIdx + 1]! * dstA * (1 - srcA)) / outA)
+      ctx.fb.data[dstIdx + 2] = Math.round((b * srcA + ctx.fb.data[dstIdx + 2]! * dstA * (1 - srcA)) / outA)
+      ctx.fb.data[dstIdx + 3] = Math.round(outA * 255)
+    }
+  }
+}
+
 /** Draw a single shape element with current style + paints. */
 function drawShape(node: SVGNode, style: InheritedStyle, ctx: RenderCtx): void {
   if (node.tag === 'svg' || node.tag === 'g' || node.tag === 'use') return
@@ -430,54 +556,63 @@ function drawShape(node: SVGNode, style: InheritedStyle, ctx: RenderCtx): void {
   // (and the stroke's bbox lookup for paint-server resolution) need it.
   const userPolys = shapeToPolys(node as SVGElementNode, ctx.tolerance, ctx.fontResolver)
   const finalT = multiply(ctx.rootTransform, style.transform)
-  // Bounding box also computed once — used by both fill and stroke paint resolvers.
   const bbox = userPolys.length > 0 ? polysBBox(userPolys) : { x: 0, y: 0, width: 0, height: 0 }
 
-  // Inheritable paint refs come from the cascade rather than the node's own
-  // attribute, so a child without its own `fill=` still picks up an ancestor's
-  // `fill="url(#g)"` paint server.
   const fillRef = style.fillRef
   const strokeRef = style.strokeRef
+  const fillRule = style.fillRule
 
-  if (userPolys.length > 0) {
+  // Pre-build fill + stroke closures so paint-order can run them in either
+  // order without code duplication.
+  const doFill = (): void => {
+    if (userPolys.length === 0) return
     const devPolys = userPolys.map(p => transformPoly(p, finalT))
     const fillBase = effectiveFill(style)
     const fillPaint = resolvePaint(fillRef, fillBase, ctx.defs, bbox, finalT)
-    if (fillPaint) fillPolygons(ctx.fb, devPolys, fillPaint)
+    if (fillPaint) fillPolygons(ctx.fb, devPolys, fillPaint, fillRule)
   }
 
-  const strokeSpec = effectiveStroke(style)
-  if (strokeSpec || strokeRef) {
+  const doStroke = (): void => {
+    const strokeSpec = effectiveStroke(style)
+    if (!strokeSpec && !strokeRef) return
     const sx = Math.hypot(finalT[0], finalT[1])
     const sy = Math.hypot(finalT[2], finalT[3])
-    const scale = (sx + sy) / 2 || 1
+    const transformScale = (sx + sy) / 2 || 1
+    // vector-effect="non-scaling-stroke": the stroke ignores the user-space
+    // → device transform's scale, so a 1px stroke remains 1px regardless
+    // of zoom.
+    const widthScale = style.vectorEffect === 'non-scaling-stroke' ? 1 : transformScale
     const strokeStyle: StrokeStyle = {
-      width: (strokeSpec?.width ?? style.strokeWidth) * scale,
+      width: (strokeSpec?.width ?? style.strokeWidth) * widthScale,
       cap: style.strokeLineCap,
       join: style.strokeLineJoin,
       miterLimit: style.strokeMiterLimit,
-      dashArray: style.strokeDashArray.map(d => d * scale),
-      dashOffset: style.strokeDashOffset * scale,
+      dashArray: style.strokeDashArray.map(d => d * widthScale),
+      dashOffset: style.strokeDashOffset * widthScale,
     }
     const baseStroke = strokeSpec?.color ?? null
     const strokePaint = resolvePaint(strokeRef, baseStroke, ctx.defs, bbox, finalT)
-    if (strokePaint) {
-      // For <path> we honour each sub-path's own open/closed flag so an
-      // unclosed sub-path strokes with caps and a closed one joins-around.
-      if (node.tag === 'path') {
-        for (const sp of pathToPolylines(node as SVGPath, ctx.tolerance)) {
-          const dev = transformPoly(sp.points, finalT)
-          strokePolylines(ctx.fb, [dev], strokePaint, strokeStyle, sp.closed)
-        }
-      }
-      else {
-        const lp = shapeToPolylines(node as SVGElementNode, ctx.tolerance, ctx.fontResolver)
-        if (lp.polys.length > 0) {
-          const devPolys = lp.polys.map(p => transformPoly(p, finalT))
-          strokePolylines(ctx.fb, devPolys, strokePaint, strokeStyle, lp.closed)
-        }
+    if (!strokePaint) return
+    if (node.tag === 'path') {
+      for (const sp of pathToPolylines(node as SVGPath, ctx.tolerance)) {
+        const dev = transformPoly(sp.points, finalT)
+        strokePolylines(ctx.fb, [dev], strokePaint, strokeStyle, sp.closed)
       }
     }
+    else {
+      const lp = shapeToPolylines(node as SVGElementNode, ctx.tolerance, ctx.fontResolver)
+      if (lp.polys.length > 0) {
+        const devPolys = lp.polys.map(p => transformPoly(p, finalT))
+        strokePolylines(ctx.fb, devPolys, strokePaint, strokeStyle, lp.closed)
+      }
+    }
+  }
+
+  // SVG 2 paint-order: walk the cascaded list. `markers` is a no-op for now.
+  for (const phase of style.paintOrder) {
+    if (phase === 'fill') doFill()
+    else if (phase === 'stroke') doStroke()
+    // 'markers' — not implemented (no <marker> element support yet).
   }
 }
 
@@ -657,6 +792,7 @@ export function rasterize(root: SVGRoot, opts: RenderOptions = {}): Framebuffer 
     rootTransform: root2dev,
     tolerance: opts.tolerance ?? config.tolerance,
     fontResolver: opts.fontResolver,
+    imageResolver: opts.imageResolver,
     defs: root.defs,
     currentColor,
     maxUseDepth: opts.maxUseDepth ?? config.maxUseDepth,
@@ -679,6 +815,9 @@ export function rasterize(root: SVGRoot, opts: RenderOptions = {}): Framebuffer 
     transform: IDENTITY,
     currentColor,
     useDepth: 0,
+    fillRule: 'nonzero',
+    paintOrder: ['fill', 'stroke', 'markers'],
+    vectorEffect: 'none',
   }
 
   renderNode(root, initialStyle, ctx)

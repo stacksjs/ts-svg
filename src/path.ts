@@ -17,12 +17,93 @@ export type PathCmd =
   | { t: 'A', rx: number, ry: number, xAxisRot: number, largeArc: boolean, sweep: boolean, x: number, y: number }
   | { t: 'Z' }
 
-const CMD_RE = /([a-zA-Z])([^a-zA-Z]*)/g
-const NUM_RE = /-?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?/g
+/** Position-aware tokenizer over the path-data string. */
+class PathLex {
+  private pos = 0
+  constructor(private readonly src: string) {}
 
-function readNumbers(s: string): number[] {
-  const m = s.match(NUM_RE)
-  return m ? m.map(Number) : []
+  /** Skip whitespace + commas. */
+  skipWs(): void {
+    const s = this.src
+    while (this.pos < s.length) {
+      const c = s.charCodeAt(this.pos)
+      // space, tab, LF, CR, comma
+      if (c === 32 || c === 9 || c === 10 || c === 13 || c === 44) this.pos++
+      else break
+    }
+  }
+
+  done(): boolean {
+    this.skipWs()
+    return this.pos >= this.src.length
+  }
+
+  /** Peek the next non-whitespace byte (or 0 if EOF). */
+  peek(): number {
+    this.skipWs()
+    return this.pos < this.src.length ? this.src.charCodeAt(this.pos) : 0
+  }
+
+  /** Read one path command letter (A-Z or a-z). Returns null at EOF. */
+  readCmd(): string | null {
+    this.skipWs()
+    if (this.pos >= this.src.length) return null
+    const c = this.src[this.pos]!
+    if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) {
+      this.pos++
+      return c
+    }
+    return null
+  }
+
+  /**
+   * Read one signed real number. Throws on malformed input. SVG path numbers
+   * may omit explicit separators between adjacent tokens (e.g. `1.2.3` is two
+   * numbers `1.2` and `.3`); the tokenizer mirrors that quirk faithfully.
+   */
+  readNumber(): number {
+    this.skipWs()
+    const s = this.src
+    const start = this.pos
+    let i = start
+    if (s[i] === '+' || s[i] === '-') i++
+    let sawDigit = false
+    let sawDot = false
+    while (i < s.length) {
+      const c = s.charCodeAt(i)
+      if (c >= 48 && c <= 57) { sawDigit = true; i++ }
+      else if (c === 46 && !sawDot) { sawDot = true; i++ }
+      else break
+    }
+    // exponent
+    if (i < s.length && (s[i] === 'e' || s[i] === 'E')) {
+      i++
+      if (s[i] === '+' || s[i] === '-') i++
+      while (i < s.length && s.charCodeAt(i) >= 48 && s.charCodeAt(i) <= 57) i++
+    }
+    if (!sawDigit) {
+      throw new Error(`parsePath: expected number at offset ${start}, got ${JSON.stringify(s[start] ?? 'EOF')}`)
+    }
+    this.pos = i
+    return Number.parseFloat(s.slice(start, i))
+  }
+
+  /**
+   * Read a single arc flag (exactly one '0' or '1'). Spec: arc flags are NOT
+   * decimal numbers — they're a single character 0|1, so `A 1 1 0 00 5 5` is
+   * legal: `00` = two flags, both 0.
+   */
+  readFlag(): 0 | 1 {
+    this.skipWs()
+    const s = this.src
+    if (this.pos >= s.length) throw new Error(`parsePath: expected arc flag, got EOF`)
+    const c = s[this.pos]!
+    if (c !== '0' && c !== '1') {
+      throw new Error(`parsePath: expected arc flag (0 or 1) at offset ${this.pos}, got ${JSON.stringify(c)}`)
+    }
+    this.pos++
+    return c === '1' ? 1 : 0
+  }
 }
 
 /** Parse an SVG path `d` string into absolute-coordinate commands. */
@@ -33,65 +114,64 @@ export function parsePath(d: string): PathCmd[] {
   let prevC2x = 0, prevC2y = 0 // previous cubic control2 (for S/s)
   let prevQ1x = 0, prevQ1y = 0 // previous quadratic control1 (for T/t)
   let prevCmd = ''
+  const lex = new PathLex(d)
 
-  let m: RegExpExecArray | null
-  CMD_RE.lastIndex = 0
-  while ((m = CMD_RE.exec(d)) != null) {
-    const cmd = m[1]!
+  /** Detect whether the next non-whitespace char is the start of a number
+   * (digit, sign, or decimal point) — used to honour the implicit-repeat
+   * rule (e.g. `M 0 0 10 10` = `M 0 0 L 10 10`). */
+  const nextIsNumber = (): boolean => {
+    const c = lex.peek()
+    return (c >= 48 && c <= 57) || c === 43 /* + */ || c === 45 /* - */ || c === 46 /* . */
+  }
+
+  while (true) {
+    const cmd = lex.readCmd()
+    if (cmd == null) break
     const rel = cmd === cmd.toLowerCase()
     const upper = cmd.toUpperCase()
-    const nums = readNumbers(m[2]!)
-    let i = 0
     let first = true
 
-    while (true) {
+    do {
       switch (upper) {
         case 'M': {
-          if (i + 1 >= nums.length) { i = nums.length; break }
-          let x = nums[i++]!, y = nums[i++]!
+          let x = lex.readNumber(), y = lex.readNumber()
           if (rel) { x += cx; y += cy }
           if (first) {
             out.push({ t: 'M', x, y })
             startX = x; startY = y
-            cx = x; cy = y
-            // Subsequent coord pairs after M are implicit lineto
-            first = false
           }
           else {
+            // Implicit lineto after the first M coord pair
             out.push({ t: 'L', x, y })
-            cx = x; cy = y
           }
+          cx = x; cy = y
           break
         }
         case 'L': {
-          if (i + 1 >= nums.length) { i = nums.length; break }
-          let x = nums[i++]!, y = nums[i++]!
+          let x = lex.readNumber(), y = lex.readNumber()
           if (rel) { x += cx; y += cy }
           out.push({ t: 'L', x, y })
           cx = x; cy = y
           break
         }
         case 'H': {
-          if (i >= nums.length) { i = nums.length; break }
-          let x = nums[i++]!
+          let x = lex.readNumber()
           if (rel) x += cx
           out.push({ t: 'L', x, y: cy })
           cx = x
           break
         }
         case 'V': {
-          if (i >= nums.length) { i = nums.length; break }
-          let y = nums[i++]!
+          let y = lex.readNumber()
           if (rel) y += cy
           out.push({ t: 'L', x: cx, y })
           cy = y
           break
         }
         case 'C': {
-          if (i + 5 >= nums.length) { i = nums.length; break }
-          let x1 = nums[i++]!, y1 = nums[i++]!
-          let x2 = nums[i++]!, y2 = nums[i++]!
-          let x = nums[i++]!, y = nums[i++]!
+          let x1 = lex.readNumber(), y1 = lex.readNumber()
+          let x2 = lex.readNumber(), y2 = lex.readNumber()
+          let x = lex.readNumber(), y = lex.readNumber()
           if (rel) { x1 += cx; y1 += cy; x2 += cx; y2 += cy; x += cx; y += cy }
           out.push({ t: 'C', x1, y1, x2, y2, x, y })
           prevC2x = x2; prevC2y = y2
@@ -99,11 +179,9 @@ export function parsePath(d: string): PathCmd[] {
           break
         }
         case 'S': {
-          if (i + 3 >= nums.length) { i = nums.length; break }
-          let x2 = nums[i++]!, y2 = nums[i++]!
-          let x = nums[i++]!, y = nums[i++]!
+          let x2 = lex.readNumber(), y2 = lex.readNumber()
+          let x = lex.readNumber(), y = lex.readNumber()
           if (rel) { x2 += cx; y2 += cy; x += cx; y += cy }
-          // Reflect prev control if previous command was C/S/s.
           let x1 = cx, y1 = cy
           if (prevCmd === 'C' || prevCmd === 'S') {
             x1 = 2 * cx - prevC2x
@@ -115,9 +193,8 @@ export function parsePath(d: string): PathCmd[] {
           break
         }
         case 'Q': {
-          if (i + 3 >= nums.length) { i = nums.length; break }
-          let x1 = nums[i++]!, y1 = nums[i++]!
-          let x = nums[i++]!, y = nums[i++]!
+          let x1 = lex.readNumber(), y1 = lex.readNumber()
+          let x = lex.readNumber(), y = lex.readNumber()
           if (rel) { x1 += cx; y1 += cy; x += cx; y += cy }
           out.push({ t: 'Q', x1, y1, x, y })
           prevQ1x = x1; prevQ1y = y1
@@ -125,8 +202,7 @@ export function parsePath(d: string): PathCmd[] {
           break
         }
         case 'T': {
-          if (i + 1 >= nums.length) { i = nums.length; break }
-          let x = nums[i++]!, y = nums[i++]!
+          let x = lex.readNumber(), y = lex.readNumber()
           if (rel) { x += cx; y += cy }
           let x1 = cx, y1 = cy
           if (prevCmd === 'Q' || prevCmd === 'T') {
@@ -139,13 +215,15 @@ export function parsePath(d: string): PathCmd[] {
           break
         }
         case 'A': {
-          if (i + 6 >= nums.length) { i = nums.length; break }
-          const rx = Math.abs(nums[i++]!)
-          const ry = Math.abs(nums[i++]!)
-          const rot = nums[i++]!
-          const largeArc = !!nums[i++]!
-          const sweep = !!nums[i++]!
-          let x = nums[i++]!, y = nums[i++]!
+          // SVG spec: rx, ry are non-negative numbers; rot is any number;
+          // largeArc and sweep are EXACTLY one character '0' or '1' (no
+          // implicit decimal absorption — `A1 1 0 00 5 5` is valid).
+          const rx = Math.abs(lex.readNumber())
+          const ry = Math.abs(lex.readNumber())
+          const rot = lex.readNumber()
+          const largeArc = lex.readFlag() === 1
+          const sweep = lex.readFlag() === 1
+          let x = lex.readNumber(), y = lex.readNumber()
           if (rel) { x += cx; y += cy }
           out.push({ t: 'A', rx, ry, xAxisRot: rot, largeArc, sweep, x, y })
           cx = x; cy = y
@@ -156,14 +234,14 @@ export function parsePath(d: string): PathCmd[] {
           cx = startX; cy = startY
           break
         }
+        default:
+          throw new Error(`parsePath: unknown command ${JSON.stringify(cmd)}`)
       }
       prevCmd = upper
       first = false
-      // Some commands (Z) take no operands
       if (upper === 'Z') break
-      if (i >= nums.length) break
-      // Implicit repeat of the same command
     }
+    while (nextIsNumber())
   }
   return out
 }

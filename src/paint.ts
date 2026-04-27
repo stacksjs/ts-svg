@@ -127,12 +127,15 @@ export function buildRadialGradientPaint(g: SVGRadialGradient, ctx: PaintContext
     return { sample: () => c }
   }
 
-  // If the focal point lies outside the gradient circle, clamp it to the
-  // circle (per spec) so the ray-circle intersection always exists.
+  // Per SVG 1.1 §15.17.2: if the focal point lies outside (or on) the
+  // gradient circle, clamp it onto the circle. We back the clamp inward by
+  // a single ULP so the ray-circle intersection is well-defined for all
+  // pixels (a focal point exactly on the boundary makes the discriminant
+  // zero on the focal ray, producing a degenerate gradient).
   const fdx0 = fx - cx, fdy0 = fy - cy
   const fdist = Math.hypot(fdx0, fdy0)
-  if (fdist > r * 0.999) {
-    const k = (r * 0.999) / fdist
+  if (fdist >= r) {
+    const k = (r * (1 - Number.EPSILON * 64)) / fdist
     fx = cx + fdx0 * k
     fy = cy + fdy0 * k
   }

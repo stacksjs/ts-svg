@@ -55,6 +55,7 @@ function polygonToEdges(poly: number[]): Edge[] {
     const ax = poly[i * 2]!, ay = poly[i * 2 + 1]!
     const bx = poly[j * 2]!, by = poly[j * 2 + 1]!
     if (ay === by) continue // horizontal — contributes nothing
+    if (ax === bx && ay === by) continue // zero-length, defensive (degenerate paths)
     if (ay < by) {
       edges.push({
         yTop: ay,
@@ -96,8 +97,9 @@ function blendPixel(fb: Framebuffer, x: number, y: number, color: RGBA, coverage
 }
 
 /**
- * Rasterise a set of polygons (multiple sub-paths) with non-zero fill rule
- * and analytical horizontal AA (4 sub-pixel samples per scanline).
+ * Rasterise a set of polygons (multiple sub-paths) with the given fill
+ * rule (`nonzero` default, `evenodd` opt-in) and analytical horizontal AA
+ * (4 sub-pixel samples per scanline).
  *
  * `polys` is an array of contours; each contour is a flat polyline
  * `[x0, y0, x1, y1, ...]` (closed implicitly via wrap).
@@ -105,7 +107,12 @@ function blendPixel(fb: Framebuffer, x: number, y: number, color: RGBA, coverage
  * `paint` may be a solid `RGBA` colour or a `{ sample(x, y): RGBA }` source
  * (e.g. a gradient evaluated per pixel).
  */
-export function fillPolygons(fb: Framebuffer, polys: number[][], paint: Paint): void {
+export function fillPolygons(
+  fb: Framebuffer,
+  polys: number[][],
+  paint: Paint,
+  fillRule: 'nonzero' | 'evenodd' = 'nonzero',
+): void {
   if (polys.length === 0) return
   if (isSolid(paint) && paint.a === 0) return
 
@@ -164,12 +171,13 @@ export function fillPolygons(fb: Framebuffer, polys: number[][], paint: Paint): 
 
     // Accumulate per-pixel coverage.
     // For each sample line, walk its sorted crossings tracking winding,
-    // and add `1/SAMPLES` to each pixel where winding != 0 weighted by
-    // the fraction of the pixel between the two crossings.
+    // and add `1/SAMPLES` to each pixel where the fill rule says "inside",
+    // weighted by the fraction of the pixel between the two crossings.
     const pixCoverage = new Map<number, number>()
     for (const [, list] of stripes) {
       list.sort((a, b) => a.x - b.x)
       let winding = 0
+      let parity = 0
       let prev = 0
       let prevInside = false
       for (const c of list) {
@@ -177,7 +185,6 @@ export function fillPolygons(fb: Framebuffer, polys: number[][], paint: Paint): 
           const a = Math.max(0, prev)
           const b = Math.min(fb.width, c.x)
           if (b > a) {
-            // Distribute coverage across pixel columns.
             const xa = Math.floor(a)
             const xb = Math.floor(b)
             for (let px = xa; px <= xb; px++) {
@@ -190,7 +197,8 @@ export function fillPolygons(fb: Framebuffer, polys: number[][], paint: Paint): 
           }
         }
         winding += c.w
-        prevInside = winding !== 0
+        parity ^= 1
+        prevInside = fillRule === 'evenodd' ? parity === 1 : winding !== 0
         prev = c.x
       }
     }
@@ -295,7 +303,11 @@ function strokeOutline(poly: number[], st: StrokeStyle, closed: boolean): number
   const left: number[] = []
   const right: number[] = []
   // Round-cap arc segment count (proportional to half-width)
-  const arcSegs = Math.max(4, Math.ceil(half * 2))
+  // Round-cap segment count grows with sqrt(half) — perimeter scales linearly
+  // with radius, but visual perception of segment count tapers with sqrt.
+  // Result: a 1px stroke gets 4 segs, a 16px stroke gets 16, a 256px stroke
+  // gets ~64. Linear `half * 2` overshot for typical SVG widths.
+  const arcSegs = Math.max(4, Math.min(64, Math.ceil(Math.sqrt(half) * 4)))
 
   // Helper: emit a join between consecutive segments.
   const emitJoin = (prev: Seg, cur: Seg): void => {

@@ -33,8 +33,28 @@ export const defaultConfig: SvgConfig = {
   maxUseDepth: 16,
 }
 
-// eslint-disable-next-line antfu/no-top-level-await
-export const config: SvgConfig = await loadConfig({
-  name: 'svg',
-  defaultConfig,
-})
+/**
+ * Synchronous default config. Available immediately at import — safe for
+ * `bun build --compile` and any bundler that doesn't support top-level
+ * await. Use `getConfig()` if you actually need user-supplied bunfig
+ * overrides (it lazy-loads on first call).
+ */
+export const config: SvgConfig = { ...defaultConfig }
+
+let _configPromise: Promise<SvgConfig> | null = null
+
+/**
+ * Lazy async config loader. Resolves to the user's `svg.config.{ts,js,json}`
+ * merged onto defaults. The first call kicks off the load; subsequent calls
+ * reuse the promise (and therefore the same merged object).
+ */
+export function getConfig(): Promise<SvgConfig> {
+  if (!_configPromise) {
+    _configPromise = loadConfig({ name: 'svg', defaultConfig })
+      .then((loaded) => {
+        Object.assign(config, loaded) // mutate the singleton so cached refs see updates
+        return config
+      })
+  }
+  return _configPromise
+}

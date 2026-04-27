@@ -58,8 +58,14 @@ function collectText(el: RawElement): string {
     if (c.tag === '#text') out.push((c as { text: string }).text)
     else out.push(collectText(c as RawElement))
   }
-  // Collapse runs of whitespace per SVG xml-space=default semantics.
-  return out.join('').replace(/\s+/g, ' ').trim()
+  const raw = out.join('')
+  // SVG `xml:space="preserve"` keeps whitespace verbatim (only newline → space
+  // and tab → space normalisation). Default `xml:space="default"` collapses
+  // runs of whitespace and trims edges.
+  if (el.attrs['xml:space'] === 'preserve') {
+    return raw.replace(/[\n\r\t]/g, ' ')
+  }
+  return raw.replace(/\s+/g, ' ').trim()
 }
 
 const SELF_CLOSING = new Set([
@@ -215,6 +221,87 @@ function parsePoints(v: string): Array<[number, number]> {
   return out
 }
 
+/**
+ * Minimal CSS rule list collected from `<style>` elements.
+ *
+ * Selectors supported: tag name (`circle`), class (`.foo`), id (`#foo`),
+ * universal (`*`), comma-separated lists. Anything more complex is ignored
+ * — no descendant combinators, no pseudo-classes, no attribute selectors.
+ */
+interface CssRule {
+  matches: (tag: string, attrs: Record<string, string>) => boolean
+  declarations: string
+}
+
+function compileSelector(sel: string): CssRule['matches'] | null {
+  const s = sel.trim()
+  if (!s) return null
+  if (s === '*') return () => true
+  if (s.startsWith('.')) {
+    const cls = s.slice(1)
+    return (_t, a) => (a.class ?? '').split(/\s+/).includes(cls)
+  }
+  if (s.startsWith('#')) {
+    const id = s.slice(1)
+    return (_t, a) => a.id === id
+  }
+  if (/^[a-zA-Z][\w-]*$/.test(s)) {
+    return t => t === s
+  }
+  return null
+}
+
+function parseStylesheet(css: string): CssRule[] {
+  const stripped = css.replace(/\/\*[\s\S]*?\*\//g, '')
+  const rules: CssRule[] = []
+  const re = /([^{}]+)\{([^}]*)\}/g
+  let m: RegExpExecArray | null
+  while ((m = re.exec(stripped)) != null) {
+    const selectors = m[1]!.split(',').map(s => s.trim()).filter(Boolean)
+    const decls = m[2]!.trim()
+    const matchers = selectors
+      .map(compileSelector)
+      .filter((f): f is CssRule['matches'] => f != null)
+    if (matchers.length === 0 || !decls) continue
+    rules.push({
+      matches: (t, a) => matchers.some(f => f(t, a)),
+      declarations: decls,
+    })
+  }
+  return rules
+}
+
+function collectStylesheets(el: RawElement): CssRule[] {
+  const out: CssRule[] = []
+  const walk = (e: RawElement): void => {
+    if (e.tag === 'style') out.push(...parseStylesheet(collectText(e)))
+    for (const c of e.children) {
+      if (c.tag !== '#text') walk(c as RawElement)
+    }
+  }
+  walk(el)
+  return out
+}
+
+/**
+ * Apply matching stylesheet rules' declarations to an element by prepending
+ * them to its `style=` attribute. Inline `style=` keeps higher precedence
+ * (because `pickStyle` only writes a value if the key isn't already present).
+ */
+function applyStylesheets(rules: CssRule[], tag: string, attrs: Record<string, string>): void {
+  if (rules.length === 0) return
+  const accum: string[] = []
+  for (const r of rules) {
+    if (r.matches(tag, attrs)) accum.push(r.declarations)
+  }
+  if (accum.length === 0) return
+  // pickStyle iterates the merged style string with FIRST-WINS semantics,
+  // so the element's inline style must come BEFORE the stylesheet
+  // declarations to take precedence (matching CSS specificity rules where
+  // inline style beats author stylesheets).
+  attrs.style = (attrs.style ? `${attrs.style}; ` : '') + accum.join('; ')
+}
+
 interface StyleAttrs {
   fill?: string | null
   stroke?: string | null
@@ -230,6 +317,9 @@ interface StyleAttrs {
   transform?: Matrix
   clipPath?: string
   mask?: string
+  fillRule?: 'nonzero' | 'evenodd'
+  paintOrder?: ReadonlyArray<'fill' | 'stroke' | 'markers'>
+  vectorEffect?: 'none' | 'non-scaling-stroke'
 }
 
 function pickStyle(rawAttrs: Record<string, string>): StyleAttrs {
@@ -256,7 +346,12 @@ function pickStyle(rawAttrs: Record<string, string>): StyleAttrs {
     const s = attrs.stroke!.trim()
     out.stroke = (s === 'none') ? null : s
   }
-  if ('stroke-width' in attrs) out.strokeWidth = parseNumber(attrs['stroke-width'], 1)
+  if ('stroke-width' in attrs) {
+    // SVG spec: stroke-width must be non-negative; treat negative as 0
+    // (per CSS Backgrounds/Borders convention) instead of inverting normals.
+    const w = parseNumber(attrs['stroke-width'], 1)
+    out.strokeWidth = Math.max(0, w)
+  }
   if ('stroke-linecap' in attrs) {
     const cap = attrs['stroke-linecap']!.trim()
     if (cap === 'butt' || cap === 'round' || cap === 'square') out.strokeLineCap = cap
@@ -269,7 +364,13 @@ function pickStyle(rawAttrs: Record<string, string>): StyleAttrs {
   if ('stroke-dasharray' in attrs) {
     const v = attrs['stroke-dasharray']!.trim()
     if (v && v !== 'none') {
-      out.strokeDashArray = v.split(/[\s,]+/).filter(Boolean).map(Number).filter(n => Number.isFinite(n) && n >= 0)
+      const parts = v.split(/[\s,]+/).filter(Boolean).map(Number)
+      // Per SVG spec: if the list contains a zero value or any negative value,
+      // the dash-array is invalid and rendered as solid.
+      const allFinite = parts.every(n => Number.isFinite(n))
+      const allNonNeg = parts.every(n => n >= 0)
+      const allNonZero = parts.some(n => n > 0)
+      out.strokeDashArray = (allFinite && allNonNeg && allNonZero) ? parts : []
     }
     else {
       out.strokeDashArray = []
@@ -282,6 +383,26 @@ function pickStyle(rawAttrs: Record<string, string>): StyleAttrs {
   if ('transform' in attrs) out.transform = parseTransform(attrs.transform!)
   if ('clip-path' in attrs) out.clipPath = attrs['clip-path']!.trim()
   if ('mask' in attrs) out.mask = attrs.mask!.trim()
+  if ('fill-rule' in attrs) {
+    const fr = attrs['fill-rule']!.trim()
+    if (fr === 'nonzero' || fr === 'evenodd') out.fillRule = fr
+  }
+  if ('paint-order' in attrs) {
+    const tokens = attrs['paint-order']!.trim().split(/\s+/).filter(Boolean) as Array<'fill' | 'stroke' | 'markers'>
+    const valid = tokens.filter(t => t === 'fill' || t === 'stroke' || t === 'markers')
+    // SVG 2: if a paint-order keyword is omitted, the remaining items follow
+    // in their default order (fill, stroke, markers). Reconstruct the full list.
+    const seen = new Set(valid)
+    const full: Array<'fill' | 'stroke' | 'markers'> = [...valid]
+    for (const k of ['fill', 'stroke', 'markers'] as const) {
+      if (!seen.has(k)) full.push(k)
+    }
+    out.paintOrder = full
+  }
+  if ('vector-effect' in attrs) {
+    const ve = attrs['vector-effect']!.trim()
+    if (ve === 'none' || ve === 'non-scaling-stroke') out.vectorEffect = ve
+  }
   return out
 }
 
@@ -304,6 +425,9 @@ function buildNode(raw: RawElement, vbWidth: number, vbHeight: number): SVGNode 
     transform: style.transform,
     clipPath: style.clipPath,
     mask: style.mask,
+    fillRule: style.fillRule,
+    paintOrder: style.paintOrder,
+    vectorEffect: style.vectorEffect,
   }
 
   switch (raw.tag) {
@@ -337,11 +461,16 @@ function buildNode(raw: RawElement, vbWidth: number, vbHeight: number): SVGNode 
       const width = parseLengthPercent(attrs.width, vb?.width ?? vbWidth, vb?.width ?? vbWidth)
       const height = parseLengthPercent(attrs.height, vb?.height ?? vbHeight, vb?.height ?? vbHeight)
       const par = parsePreserveAspectRatio(attrs.preserveAspectRatio)
+      // Inner-svg `x`/`y` shift the viewport; outer-svg has no x/y.
+      const x = parseLengthPercent(attrs.x, vbWidth, 0)
+      const y = parseLengthPercent(attrs.y, vbHeight, 0)
       const root: SVGRoot = {
         tag: 'svg',
         ...baseFields,
         width,
         height,
+        x,
+        y,
         viewBox: vb,
         preserveAspectRatio: par,
         children: raw.children
@@ -429,6 +558,21 @@ function buildNode(raw: RawElement, vbWidth: number, vbHeight: number): SVGNode 
         y: parseNumber(attrs.y),
         width: attrs.width != null ? parseLengthPercent(attrs.width, vbWidth, undefined as never) : undefined,
         height: attrs.height != null ? parseLengthPercent(attrs.height, vbHeight, undefined as never) : undefined,
+      }
+    }
+    case 'image': {
+      const href = attrs.href ?? attrs['xlink:href'] ?? ''
+      const w = parseLengthPercent(attrs.width, vbWidth, 0)
+      const h = parseLengthPercent(attrs.height, vbHeight, 0)
+      return {
+        tag: 'image',
+        ...baseFields,
+        href,
+        x: parseLengthPercent(attrs.x, vbWidth, 0),
+        y: parseLengthPercent(attrs.y, vbHeight, 0),
+        width: w,
+        height: h,
+        preserveAspectRatio: parsePreserveAspectRatio(attrs.preserveAspectRatio),
       }
     }
     case 'linearGradient':
@@ -738,16 +882,43 @@ function collectDefs(raw: RawElement, vbW: number, vbH: number): SVGDefs {
  *
  * Throws if the input doesn't contain a top-level `<svg>` element.
  */
-export function parseSVG(svg: string): SVGRoot {
-  if (typeof svg !== 'string' || svg.trim().length === 0) {
-    throw new TypeError('parseSVG: expected a non-empty SVG source string')
+export function parseSVG(svg: string | Uint8Array | ArrayBuffer): SVGRoot {
+  // Coerce binary inputs (typical when reading from disk via `Bun.file().bytes()`).
+  let src: string
+  if (typeof svg === 'string') {
+    src = svg
   }
-  const raw = parseRaw(svg)
+  else if (svg instanceof Uint8Array) {
+    src = new TextDecoder('utf-8').decode(svg)
+  }
+  else if (svg instanceof ArrayBuffer) {
+    src = new TextDecoder('utf-8').decode(new Uint8Array(svg))
+  }
+  else {
+    throw new TypeError('parseSVG: expected string, Uint8Array, or ArrayBuffer')
+  }
+  if (src.trim().length === 0) {
+    throw new TypeError('parseSVG: expected a non-empty SVG source')
+  }
+  const raw = parseRaw(src)
   if (!raw) {
     throw new Error('parseSVG: input did not contain any XML element')
   }
   if (raw.tag !== 'svg') {
     throw new Error(`parseSVG: top-level element must be <svg>, got <${raw.tag}>`)
+  }
+  // Pre-pass: collect <style> stylesheets and project them onto every raw
+  // element's `style=` attribute. Done as a tree walk before buildNode so
+  // pickStyle's existing precedence rules apply to the cascaded values.
+  const sheets = collectStylesheets(raw)
+  if (sheets.length > 0) {
+    const apply = (e: RawElement): void => {
+      applyStylesheets(sheets, e.tag, e.attrs)
+      for (const c of e.children) {
+        if (c.tag !== '#text') apply(c as RawElement)
+      }
+    }
+    apply(raw)
   }
   // Initial fallback dims (before we know viewBox/width); the SVG node
   // resolves its own from attributes.
