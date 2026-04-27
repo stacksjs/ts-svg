@@ -1,118 +1,104 @@
 # Install
 
-_This is just an example of the ts-starter docs._
+`ts-svg` ships as a single npm package with both a library API and a `svg` CLI. There are no native dependencies; the package itself is enough on every platform Bun or Node supports.
 
-Installing `rpx` is easy. Simply pull it in via your package manager of choice, or download the binary directly.
+If you only need the library, install it like any other dependency. If you want the CLI globally without npm, prebuilt binaries are published with each release.
 
-## Package Managers
-
-Choose your package manager of choice:
+## Package managers
 
 ::: code-group
 
-```sh [npm]
-npm install --save-dev @stacksjs/rpx
-# npm i -d @stacksjs/rpx
-
-# or, install globally via
-npm i -g @stacksjs/rpx
+```sh [bun]
+bun add ts-svg
+# global CLI
+bun add --global ts-svg
 ```
 
-```sh [bun]
-bun install --dev @stacksjs/rpx
-# bun add --dev @stacksjs/rpx
-# bun i -d @stacksjs/rpx
-
-# or, install globally via
-bun add --global @stacksjs/rpx
+```sh [npm]
+npm install ts-svg
+# global CLI
+npm install -g ts-svg
 ```
 
 ```sh [pnpm]
-pnpm add --save-dev @stacksjs/rpx
-# pnpm i -d @stacksjs/rpx
-
-# or, install globally via
-pnpm add --global @stacksjs/rpx
+pnpm add ts-svg
+# global CLI
+pnpm add --global ts-svg
 ```
 
 ```sh [yarn]
-yarn add --dev @stacksjs/rpx
-# yarn i -d @stacksjs/rpx
-
-# or, install globally via
-yarn global add @stacksjs/rpx
-```
-
-```sh [brew]
-brew install rpx # coming soon
-```
-
-```sh [pkgx]
-pkgx rpx # coming soon
+yarn add ts-svg
+# global CLI
+yarn global add ts-svg
 ```
 
 :::
 
-Read more about how to use it in the Usage section of the documentation.
+::: tip
+Bun is the best-supported runtime — the test suite, CLI binaries, and `bun build --compile` workflow are all exercised on it. Node 18+ also works through the same package; the published JS targets ES2022 plus `node:buffer`.
+:::
 
-## Binaries
+## Programmatic use
 
-Choose the binary that matches your platform and architecture:
+```ts
+import { svgToPng, parseSVG, rasterize, encodePng, Resvg } from 'ts-svg'
+```
+
+That single entry point covers every API documented in [Usage](/usage) and the [API reference](/api). Types are re-exported from the same module — no `/types` sub-path required.
+
+## Prebuilt CLI binaries
+
+Each GitHub release includes a self-contained `svg` binary built with `bun build --compile`. No runtime install needed; download the right artifact, mark it executable, drop it on your `PATH`.
+
+Replace `<version>` with the [latest release tag](https://github.com/stacksjs/ts-svg/releases) (e.g. `v0.1.0`).
 
 ::: code-group
 
 ```sh [macOS (arm64)]
-# Download the binary
-curl -L https://github.com/stacksjs/rpx/releases/download/v0.9.1/rpx-darwin-arm64 -o rpx
-
-# Make it executable
-chmod +x rpx
-
-# Move it to your PATH
-mv rpx /usr/local/bin/rpx
+curl -L https://github.com/stacksjs/ts-svg/releases/download/<version>/svg-darwin-arm64 -o svg
+chmod +x svg
+mv svg /usr/local/bin/svg
 ```
 
 ```sh [macOS (x64)]
-# Download the binary
-curl -L https://github.com/stacksjs/rpx/releases/download/v0.9.1/rpx-darwin-x64 -o rpx
-
-# Make it executable
-chmod +x rpx
-
-# Move it to your PATH
-mv rpx /usr/local/bin/rpx
+curl -L https://github.com/stacksjs/ts-svg/releases/download/<version>/svg-darwin-x64 -o svg
+chmod +x svg
+mv svg /usr/local/bin/svg
 ```
 
 ```sh [Linux (arm64)]
-# Download the binary
-curl -L https://github.com/stacksjs/rpx/releases/download/v0.9.1/rpx-linux-arm64 -o rpx
-
-# Make it executable
-chmod +x rpx
-
-# Move it to your PATH
-mv rpx /usr/local/bin/rpx
+curl -L https://github.com/stacksjs/ts-svg/releases/download/<version>/svg-linux-arm64 -o svg
+chmod +x svg
+mv svg /usr/local/bin/svg
 ```
 
 ```sh [Linux (x64)]
-# Download the binary
-curl -L https://github.com/stacksjs/rpx/releases/download/v0.9.1/rpx-linux-x64 -o rpx
-
-# Make it executable
-chmod +x rpx
-
-# Move it to your PATH
-mv rpx /usr/local/bin/rpx
+curl -L https://github.com/stacksjs/ts-svg/releases/download/<version>/svg-linux-x64 -o svg
+chmod +x svg
+mv svg /usr/local/bin/svg
 ```
 
 ```sh [Windows (x64)]
-# Download the binary
-curl -L https://github.com/stacksjs/rpx/releases/download/v0.9.1/rpx-windows-x64.exe -o rpx.exe
-
-# Move it to your PATH (adjust the path as needed)
-move rpx.exe C:\Windows\System32\rpx.exe
+curl -L https://github.com/stacksjs/ts-svg/releases/download/<version>/svg-windows-x64.exe -o svg.exe
+move svg.exe C:\Windows\System32\svg.exe
 ```
 
-::: tip
-You can also find the `rpx` binaries in GitHub [releases](https://github.com/stacksjs/rpx/releases).
 :::
+
+::: tip
+You can also browse all released binaries directly on the [GitHub releases page](https://github.com/stacksjs/ts-svg/releases).
+:::
+
+## Verifying the install
+
+```sh
+svg version          # CLI binary
+bun -e "import('ts-svg').then(m => console.log(Object.keys(m)))"
+```
+
+The library export list should include `parseSVG`, `rasterize`, `encodePng`, `svgToPng`, `Resvg`, and the helper utilities listed in the [API reference](/api).
+
+## Next
+
+- [Usage](/usage) — library and CLI walkthroughs.
+- [Configuration](/config) — `svg.config.ts` defaults.

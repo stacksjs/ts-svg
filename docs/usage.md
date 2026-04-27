@@ -1,89 +1,141 @@
-# Get Started
+# Usage
 
-There are two ways of using this reverse proxy: _as a library or as a CLI._
+`ts-svg` exposes three layers, library-first and CLI-second. Start with whichever matches your call site; mix as needed.
 
-## Library
+## Library: one-shot
 
-Given the npm package is installed:
-
-```ts
-import type { TlsConfig } from '@stacksjs/rpx'
-import { startProxy } from '@stacksjs/rpx'
-
-export interface CleanupConfig {
-  hosts: boolean // clean up /etc/hosts, defaults to false
-  certs: boolean // clean up certificates, defaults to false
-}
-
-export interface ReverseProxyConfig {
-  from: string // domain to proxy from, defaults to localhost:3000
-  to: string // domain to proxy to, defaults to stacks.localhost
-  cleanUrls?: boolean // removes the .html extension from URLs, defaults to false
-  https: boolean | TlsConfig // automatically uses https, defaults to true, also redirects http to https
-  cleanup?: boolean | CleanupConfig // automatically cleans up /etc/hosts, defaults to false
-  verbose: boolean // log verbose output, defaults to false
-}
-
-const config: ReverseProxyOptions = {
-  from: 'localhost:3000',
-  to: 'my-docs.localhost',
-  cleanUrls: true,
-  https: true,
-  cleanup: false,
-}
-
-startProxy(config)
-```
-
-In case you are trying to start multiple proxies, you may use this configuration:
+`svgToPng` is the shortest path. Everything else in the library is built on top of it.
 
 ```ts
-// reverse-proxy.config.{ts,js}
-import type { ReverseProxyOptions } from '@stacksjs/rpx'
-import os from 'node:os'
-import path from 'node:path'
+import { svgToPng } from 'ts-svg'
+import { writeFileSync } from 'node:fs'
 
-const config: ReverseProxyOptions = {
-  https: { // https: true -> also works with sensible defaults
-    caCertPath: path.join(os.homedir(), '.stacks', 'ssl', `stacks.localhost.ca.crt`),
-    certPath: path.join(os.homedir(), '.stacks', 'ssl', `stacks.localhost.crt`),
-    keyPath: path.join(os.homedir(), '.stacks', 'ssl', `stacks.localhost.crt.key`),
-  },
+const svg = await Bun.file('logo.svg').text()
+writeFileSync('logo.png', svgToPng(svg, { scale: 2 }))
+```
 
-  cleanup: {
-    hosts: true,
-    certs: false,
-  },
+`svgToPng(svg, opts?)` returns a `Buffer` containing PNG bytes. Pass any [`RenderOptions`](/api#renderoptions) (width / height / scale / background / tolerance / etc.).
 
-  proxies: [
-    {
-      from: 'localhost:5173',
-      to: 'my-app.localhost',
-      cleanUrls: true,
-    },
-    {
-      from: 'localhost:5174',
-      to: 'my-api.local',
-    },
-  ],
+## Library: element tree
 
-  verbose: true,
+When you need to inspect or mutate the SVG between parse and render, use the three-step pipeline:
+
+```ts
+import { parseSVG, rasterize, encodePng } from 'ts-svg'
+
+const root = parseSVG(svg)            // typed SVGRoot — discriminated by `tag`
+const fb = rasterize(root, { scale: 2 }) // Framebuffer { width, height, data: Uint8Array }
+const png = encodePng(fb)             // Buffer
+```
+
+`SVGRoot` exposes `children: SVGNode[]` plus a `defs` registry for gradients, clip-paths, and masks. Mutate freely — `rasterize` is pure on the input tree.
+
+```ts
+// Recolour every <rect> to white before rendering
+import type { SVGNode } from 'ts-svg'
+
+function walk(node: SVGNode): void {
+  if (node.tag === 'rect') node.fill = 'white'
+  if ('children' in node) node.children.forEach(walk)
+}
+root.children.forEach(walk)
+```
+
+See [Features → Element tree](/features/parser) for the full node taxonomy.
+
+## Library: Resvg shim
+
+If you're migrating from `@resvg/resvg-js`, change one import:
+
+```ts
+import { Resvg } from 'ts-svg' // was '@resvg/resvg-js'
+
+const resvg = new Resvg(svg, {
+  fitTo: { mode: 'width', value: 1024 },
+  background: '#fff',
+})
+
+const img = resvg.render()
+img.width()      // number
+img.height()     // number
+img.pixels()     // Uint8Array (RGBA, top-to-bottom; copy of the framebuffer)
+img.asPng()      // Buffer
+```
+
+`fitTo.mode` accepts `'original'`, `'zoom'`, `'width'`, or `'height'`. The constructor parses the SVG once and caches the tree, so calling `render()` again is cheap.
+
+For the migration matrix and the resvg-js options that are accepted but not yet implemented, see [Advanced → Resvg shim](/advanced/resvg-shim).
+
+## Fonts and text
+
+`<text>` elements need a font resolver — without one, text is silently skipped (rendering anything fakish would be worse than rendering nothing). A resolver maps a font request to glyph data:
+
+```ts
+import { svgToPng, type FontResolver } from 'ts-svg'
+
+const fontResolver: FontResolver = (familyList, sizeHint) => {
+  // return a ResolvedFont, or null to skip this <text>
+  return loadFont(familyList, sizeHint)
 }
 
-export default config
+svgToPng(svg, { fontResolver })
 ```
+
+See [Advanced → Font resolvers](/advanced/font-resolvers) for the full `FontResolver` contract and recipes for shipping bundled fonts.
 
 ## CLI
 
-```bash
-rpx --from localhost:3000 --to my-project.localhost
-rpx --from localhost:8080 --to my-project.test --keyPath ./key.pem --certPath ./cert.pem
-rpx --help
-rpx --version
-```
-
-## Testing
+The package installs an `svg` executable. Two commands cover the common cases.
 
 ```bash
-bun test
+# Rasterise a file to PNG
+svg render logo.svg -o logo.png --scale 2
+
+# Pin output dimensions
+svg render logo.svg --width 1024 --background "#fff"
+
+# Read from stdin, write to a path
+cat logo.svg | svg render --stdin -o logo.png
+
+# Convenience: parseSVG + rasterize + encodePng
+svg to-png logo.svg
 ```
+
+| Flag | Default | Notes |
+| --- | --- | --- |
+| `-o, --out <file>` | `<input>.png` | Required when reading from stdin. |
+| `-s, --scale <factor>` | `1` | Multiplies the SVG's intrinsic dims. |
+| `-w, --width <px>` | — | Overrides scale; aspect-preserved if height omitted. |
+| `-h, --height <px>` | — | Overrides scale; aspect-preserved if width omitted. |
+| `-b, --background <color>` | transparent | Any CSS colour string. |
+| `-t, --tolerance <px>` | `0.25` | Bezier flattening tolerance. |
+| `--stdin` | — | Read SVG from stdin (overrides positional input). |
+
+`svg --help` prints the full reference; `svg version` prints the build version.
+
+See [Advanced → CLI](/advanced/cli) for piping recipes and the binary distribution model.
+
+## Reusing buffers
+
+For animation loops or per-frame thumbnails, `Resvg#renderInto(fb)` lets you rasterise into a pre-allocated framebuffer instead of reallocating an RGBA buffer per call:
+
+```ts
+import { Resvg, createFramebuffer, TRANSPARENT } from 'ts-svg'
+
+const resvg = new Resvg(svg)
+const fb = createFramebuffer(512, 512, TRANSPARENT)
+
+for (let i = 0; i < 60; i++) {
+  resvg.renderInto(fb)
+  // fb.data is a Uint8Array you can blit / encode / hash
+}
+```
+
+See [Advanced → Buffer reuse](/advanced/buffer-reuse) for the full lifecycle.
+
+## Next
+
+- [API reference](/api) — every export with its signature and types.
+- [Configuration](/config) — `svg.config.ts` defaults.
+- [Features](/features/parser) — capability deep dives.
+- [Advanced](/advanced/resvg-shim) — performance, resolvers, custom pipelines.

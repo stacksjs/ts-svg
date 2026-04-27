@@ -10,6 +10,7 @@ logs
 node_modules
 temp
 docs/.vitepress/cache
+docs/.bunpress
 pantry
 .zed
 .cursor

@@ -1,93 +1,74 @@
-<p align="center"><img src="https://github.com/stacksjs/rpx/blob/main/.github/art/cover.jpg?raw=true" alt="Social Card of this repo"></p>
+<p align="center"><img src="https://github.com/stacksjs/ts-svg/blob/main/.github/art/cover.jpg?raw=true" alt="Social Card of this repo"></p>
 
-# A Better Developer Experience
+# Introduction
 
-> A TypeScript Starter Kit that will help you bootstrap your next project without minimal opinion.
+`ts-svg` is a pure-TypeScript SVG parser, rasterizer, and PNG encoder. It runs anywhere Bun or Node runs and ships in three layers you can mix and match:
 
-# bun-ts-starter
+1. **Convenience pipeline** — `svgToPng(svg, opts)` for one-shot rendering.
+2. **Element-tree API** — `parseSVG` → `rasterize` → `encodePng` when you want to inspect or mutate the document between parse and render.
+3. **`Resvg` shim** — a class-shaped façade compatible with `@resvg/resvg-js`, so you can migrate without touching call sites.
 
-This is an opinionated TypeScript Starter kit to help kick-start development of your next Bun package.
+Internally, every shape is flattened to polygons and drawn with an analytical anti-aliased rasterizer (4× horizontal sub-sampling, non-zero fill rule). Curves and arcs use adaptive subdivision driven by a flatness tolerance you control.
 
-## Get Started
+## Why ts-svg
 
-It's rather simple to get your package development started:
+- **No native bindings.** No `node-gyp`, no platform-specific binaries, no WASM blob to ship in your bundle. Works inside `bun build --compile`, edge runtimes, and locked-down environments where `@resvg/resvg-js` or `sharp` can't go.
+- **Typed end to end.** `parseSVG` returns a discriminated-union `SVGNode` tree (`SVGRect`, `SVGPath`, `SVGGroup`, …), not a generic AST you have to second-guess. Every renderer option, every config field, every paint server has a TypeScript interface.
+- **Drop-in for the common path.** If you're already using `@resvg/resvg-js`, switching is one import change. The shim covers `fitTo`, `background`, `tolerance`, `currentColor`, `fontResolver`, and the `RenderedImage` API (`asPng`, `pixels`, `width`, `height`).
+- **Pixel-tested.** Every supported element has a fixture test that asserts specific colours at specific coordinates, so regressions are caught immediately rather than as "looks slightly off."
 
-```bash
-# you may use this GitHub template or the following command:
-bunx degit stacksjs/ts-starter my-pkg
-cd my-pkg
+## Quick example
 
- # if you don't have pnpm installed, run `npm i -g pnpm`
-bun i # install all deps
-bun run build # builds the library for production-ready use
+```ts
+import { svgToPng } from 'ts-svg'
+import { writeFileSync } from 'node:fs'
 
-# after you have successfully committed, you may create a "release"
-bun run release # automates git commits, versioning, and changelog generations
+const svg = `
+<svg xmlns="http://www.w3.org/2000/svg" width="200" height="80">
+  <rect width="100%" height="100%" fill="#0ea5e9"/>
+  <text x="100" y="50" text-anchor="middle"
+        font-family="sans-serif" font-size="24" fill="white">ts-svg</text>
+</svg>`
+
+writeFileSync('out.png', svgToPng(svg, { scale: 2 }))
 ```
 
-_Check out the package.json scripts for more commands._
+`<text>` rendering needs a [font resolver](/advanced/font-resolvers); without one, text is silently skipped.
 
-### Developer Experience (DX)
+## When to reach for which API
 
-This Starter Kit comes pre-configured with the following:
+| You want to… | Use |
+| --- | --- |
+| Convert one SVG to one PNG | `svgToPng(svg, opts)` |
+| Inspect, mutate, or re-render the document | `parseSVG` → `rasterize` → `encodePng` |
+| Migrate from `@resvg/resvg-js` | `import { Resvg } from 'ts-svg'` |
+| Composite ts-svg output into your own pixel buffer | `Resvg#renderInto(fb)` |
+| Customise paths, transforms, or colour parsing yourself | re-export the lower-level helpers (`parsePath`, `parseTransform`, `parseColor`, …) |
 
-- [Powerful Build Process](https://github.com/oven-sh/bun) - via Bun
-- [Fully Typed APIs](https://www.typescriptlang.org/) - via TypeScript
-- [Documentation-ready](https://vitepress.dev/) - via VitePress
-- [CLI & Binary](https://www.npmjs.com/package/bunx) - via Bun & CAC
-- [Be a Good Commitizen](https://www.npmjs.com/package/git-cz) - pre-configured Commitizen & git-cz setup to simplify semantic git commits, versioning, and changelog generations
-- [Built With Testing In Mind](https://bun.sh/docs/cli/test) - pre-configured unit-testing powered by [Bun](https://bun.sh/docs/cli/test)
-- [Renovate](https://renovatebot.com/) - optimized & automated PR dependency updates
-- [ESLint](https://eslint.org/) - for code linting _(and formatting)_
-- [GitHub Actions](https://github.com/features/actions) - runs your CI _(fixes code style issues, tags releases & creates its changelogs, runs the test suite, etc.)_
+## What's supported
 
-## Changelog
+`svg`, `g`, `defs`, `rect`, `circle`, `ellipse`, `line`, `polygon`, `polyline`, `path`, `text` (with a font resolver), `image` (with an image resolver), `use`, `linearGradient`, `radialGradient`, `clipPath`, `mask`. Stroke styling covers `stroke-width`, `stroke-linecap`, `stroke-linejoin`, `stroke-miterlimit`, `stroke-dasharray`, and `stroke-dashoffset`. Paint servers honour `gradientUnits="objectBoundingBox"` and `xlink:href` chaining. SVG 2 attributes — `paint-order`, `mask-type="alpha"`, `vector-effect="non-scaling-stroke"` — are honoured too.
 
-Please see our [releases](https://github.com/stacksjs/stacks/releases) page for more information on what has changed recently.
+See the [Features section](/features/parser) for deep dives on each capability.
 
-## Stargazers
+## What's out of scope today
 
-[![Stargazers](https://starchart.cc/stacksjs/ts-starter.svg?variant=adaptive)](https://starchart.cc/stacksjs/ts-starter)
+`<style>` / CSS selector resolution, `<filter>` (no Gaussian blur, drop shadow, etc.), `<pattern>`, `<symbol>` advanced semantics, and per-glyph `<tspan>` positioning. If you need any of these, file an issue — most are tractable, they just aren't implemented yet.
 
-## Contributing
+## Next steps
 
-Please review the [Contributing Guide](https://github.com/stacksjs/contributing) for details.
+- [Install ts-svg](/install) — package managers and prebuilt CLI binaries.
+- [Usage walkthrough](/usage) — library API, the `Resvg` shim, and the `svg` CLI.
+- [API reference](/api) — every export with its signature.
+- [Configuration](/config) — `svg.config.ts` defaults that apply project-wide.
+- [Features](/features/parser) — what each capability does and how to use it.
+- [Advanced](/advanced/resvg-shim) — buffer reuse, font/image resolvers, performance.
 
 ## Community
 
-For help, discussion about best practices, or any other conversation that would benefit from being searchable:
-
-[Discussions on GitHub](https://github.com/stacksjs/stacks/discussions)
-
-For casual chit-chat with others using this package:
-
-[Join the Stacks Discord Server](https://discord.gg/stacksjs)
-
-## Postcardware
-
-Two things are true: Stacks OSS will always stay open-source, and we do love to receive postcards from wherever Stacks is used! 🌍 _We also publish them on our website. And thank you, Spatie_
-
-Our address: Stacks.js, 12665 Village Ln #2306, Playa Vista, CA 90094
-
-## Sponsors
-
-We would like to extend our thanks to the following sponsors for funding Stacks development. If you are interested in becoming a sponsor, please reach out to us.
-
-- [JetBrains](https://www.jetbrains.com/)
-- [The Solana Foundation](https://solana.com/)
-
-## Credits
-
-- [Chris Breuer](https://github.com/chrisbbreuer)
-- [All Contributors](https://github.com/stacksjs/rpx/graphs/contributors)
+- [Discussions on GitHub](https://github.com/stacksjs/ts-svg/discussions)
+- [Stacks Discord](https://discord.gg/stacksjs)
 
 ## License
 
-The MIT License (MIT). Please see [LICENSE](https://github.com/stacksjs/ts-starter/tree/main/LICENSE.md) for more information.
-
-Made with 💙
-
-<!-- Badges -->
-
-<!-- [codecov-src]: https://img.shields.io/codecov/c/gh/stacksjs/rpx/main?style=flat-square
-[codecov-href]: https://codecov.io/gh/stacksjs/rpx -->
+The MIT License (MIT). See [LICENSE](https://github.com/stacksjs/ts-svg/tree/main/LICENSE.md).

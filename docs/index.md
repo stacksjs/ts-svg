@@ -3,9 +3,9 @@
 layout: home
 
 hero:
-  name: "ts-starter"
-  text: "For a better local environment."
-  tagline: "Modern and smart reverse proxy."
+  name: "ts-svg"
+  text: "Pure-TypeScript SVG → PNG."
+  tagline: "Parser, rasterizer, and PNG encoder for Bun & Node — no native bindings, no WASM, no Skia."
   image: /images/logo-white.png
   actions:
     - theme: brand
@@ -13,21 +13,27 @@ hero:
       link: /intro
     - theme: alt
       text: View on GitHub
-      link: https://github.com/stacksjs/rpx
+      link: https://github.com/stacksjs/ts-svg
 
 features:
-  - title: "Minimal Starter Kit"
-    icon: "🔀"
-    details: "Bootstrap your next TypeScript project."
-  - title: "Documentation"
-    icon: "📚"
-    details: "Easily document your idea/package/library."
-  - title: "CLI"
-    icon: "🛠"
-    details: "Build your own CLI."
-  - title: "Binary"
-    icon: "🚀"
-    details: "Automatically builds a binary for your project out of your CLI."
+  - title: "Pure TypeScript"
+    icon: "📜"
+    details: "Zero native deps. Runs anywhere Bun or Node runs — including bun build --compile single-file binaries."
+  - title: "Drop-in Resvg shim"
+    icon: "🔁"
+    details: "Swap import { Resvg } from '@resvg/resvg-js' for ts-svg with no call-site changes."
+  - title: "Typed element tree"
+    icon: "🌲"
+    details: "parseSVG(svg) returns a typed SVGRoot you can walk, mutate, and re-rasterise."
+  - title: "Analytical AA"
+    icon: "✨"
+    details: "4× horizontal sub-sampling, non-zero fill rule, adaptive Bezier flattening — smooth edges by default."
+  - title: "Real path grammar"
+    icon: "🛣️"
+    details: "Full M m L l H h V v C c S s Q q T t A a Z z support, with cubic / quadratic / arc flattening."
+  - title: "Gradients · clip · mask · use"
+    icon: "🎨"
+    details: "Linear and radial gradients (objectBoundingBox), clip-paths, masks (with alpha), and <use> with cycle-safe recursion."
 ---
 
 <Home />
