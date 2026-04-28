@@ -72,91 +72,218 @@ const SELF_CLOSING = new Set([
   'rect', 'circle', 'ellipse', 'line', 'polygon', 'polyline', 'path', 'use', 'image', 'stop',
 ])
 
-function decodeEntities(s: string): string {
-  return s
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>')
-    .replace(/&quot;/g, '"')
-    .replace(/&apos;/g, '\'')
-    .replace(/&#x([0-9a-fA-F]+);/g, (_, hex) => String.fromCodePoint(Number.parseInt(hex, 16)))
-    .replace(/&#(\d+);/g, (_, dec) => String.fromCodePoint(Number.parseInt(dec, 10)))
-    .replace(/&amp;/g, '&')
+const NAMED_ENTITIES: Record<string, string> = {
+  amp: '&',
+  lt: '<',
+  gt: '>',
+  quot: '"',
+  apos: '\'',
 }
 
-function parseAttributes(s: string): Record<string, string> {
-  // Match key="val" / key='val' / key=val
-  const out: Record<string, string> = {}
-  const re = /([\w:-]+)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/g
-  let m: RegExpExecArray | null
-  while ((m = re.exec(s)) != null) {
-    const key = m[1]!
-    const val = m[2] ?? m[3] ?? m[4] ?? ''
-    out[key] = decodeEntities(val)
-  }
-  return out
+const ENTITY_RE = /&(#x[0-9a-f]+|#[0-9]+|[a-z][a-z0-9]*);/gi
+
+/**
+ * Decode XML entities. Hot path: when no `&` is present (the overwhelming
+ * majority of attribute values), return the original string unchanged.
+ */
+function decodeEntities(s: string): string {
+  if (s.indexOf('&') < 0) return s
+  return s.replace(ENTITY_RE, (whole, body: string) => {
+    if (body.charCodeAt(0) === 35 /* # */) {
+      if (body.charCodeAt(1) === 120 /* x */ || body.charCodeAt(1) === 88 /* X */) {
+        const code = Number.parseInt(body.slice(2), 16)
+        return Number.isFinite(code) ? String.fromCodePoint(code) : whole
+      }
+      const code = Number.parseInt(body.slice(1), 10)
+      return Number.isFinite(code) ? String.fromCodePoint(code) : whole
+    }
+    const lower = body.toLowerCase()
+    if (lower in NAMED_ENTITIES) return NAMED_ENTITIES[lower]!
+    return whole
+  })
 }
 
 /**
- * Tokenise the SVG source into a flat element tree (raw, before
- * type-specific normalisation).
+ * Single-pass index-based SVG/XML tokeniser → raw element tree.
+ *
+ * Performance notes:
+ *  - No regex scans of the source — each character is visited at most twice
+ *    (once for the outer `<…>` boundary scan, once for attribute parsing).
+ *  - `String.charCodeAt` comparisons instead of `.startsWith` / `.indexOf`
+ *    on multi-char delimiters.
+ *  - `decodeEntities` early-exits for attribute values without `&`
+ *    (≈100% of typical SVG content), so a 90 KB path `d=` attr costs O(1)
+ *    instead of 7 regex passes over the whole string.
+ *  - Comments / CDATA / DOCTYPE / `<?xml?>` are skipped inline rather than
+ *    pre-stripped via four full-text `.replace()` passes.
  */
 function parseRaw(svg: string): RawElement | null {
-  // Strip XML decl, doctype, comments, CDATA — we don't render any of them.
-  // The doctype pattern handles internal subsets: `<!DOCTYPE foo [...]>` —
-  // match the optional `[...]` block separately so we don't terminate at the
-  // first `>` inside an entity declaration.
-  const src = svg
-    .replace(/<\?xml[^?]*\?>/g, '')
-    .replace(/<!DOCTYPE[^[>]*(?:\[[\s\S]*?\])?[^>]*>/g, '')
-    .replace(/<!--[\s\S]*?-->/g, '')
-    .replace(/<!\[CDATA\[[\s\S]*?\]\]>/g, '')
-    .trim()
-
-  // Single-pass tokeniser
+  const len = svg.length
   const stack: RawElement[] = []
   let root: RawElement | null = null
   let i = 0
-  while (i < src.length) {
-    const lt = src.indexOf('<', i)
-    if (lt < 0) {
-      // Trailing text (rare at root level — we ignore).
-      break
-    }
-    // Text between previous tag and this `<`.
-    if (lt > i && stack.length > 0) {
-      const text = decodeEntities(src.slice(i, lt))
-      if (text.length > 0) {
-        stack[stack.length - 1]!.children.push({ tag: '#text', text })
+
+  while (i < len) {
+    let c = svg.charCodeAt(i)
+
+    if (c !== 60 /* < */) {
+      // Text content — read until next `<`.
+      const start = i
+      while (i < len && svg.charCodeAt(i) !== 60) i++
+      if (stack.length > 0) {
+        const raw = svg.slice(start, i)
+        // Skip whitespace-only text fast (no allocation for trim/decode).
+        let allWs = true
+        for (let k = 0; k < raw.length; k++) {
+          const cc = raw.charCodeAt(k)
+          if (cc !== 32 && cc !== 9 && cc !== 10 && cc !== 13) { allWs = false; break }
+        }
+        if (!allWs) {
+          const text = decodeEntities(raw)
+          stack[stack.length - 1]!.children.push({ tag: '#text', text })
+        }
       }
-    }
-    if (src[lt + 1] === '/') {
-      // closing tag
-      const gt = src.indexOf('>', lt)
-      if (gt < 0) break
-      stack.pop()
-      i = gt + 1
       continue
     }
-    const gt = src.indexOf('>', lt)
-    if (gt < 0) break
-    let inner = src.slice(lt + 1, gt)
-    let selfClose = false
-    if (inner.endsWith('/')) {
-      selfClose = true
-      inner = inner.slice(0, -1).trimEnd()
+
+    // We're at `<`. Inspect the next char to dispatch.
+    const next = svg.charCodeAt(i + 1)
+
+    if (next === 33 /* ! */) {
+      // <!--, <![CDATA[, <!DOCTYPE — all are skipped (we don't render them).
+      if (svg.charCodeAt(i + 2) === 45 && svg.charCodeAt(i + 3) === 45) {
+        // <!-- comment -->
+        const end = svg.indexOf('-->', i + 4)
+        i = end < 0 ? len : end + 3
+        continue
+      }
+      if (svg.charCodeAt(i + 2) === 91 /* [ */) {
+        // <![CDATA[ … ]]>
+        const end = svg.indexOf(']]>', i + 9)
+        i = end < 0 ? len : end + 3
+        continue
+      }
+      // <!DOCTYPE … [internal subset]? >
+      let j = i + 2
+      let inSubset = false
+      while (j < len) {
+        const cc = svg.charCodeAt(j)
+        if (cc === 91) inSubset = true
+        else if (cc === 93) inSubset = false
+        else if (cc === 62 && !inSubset) break
+        j++
+      }
+      i = j + 1
+      continue
     }
-    // First whitespace separates tag from attrs
-    const wsIdx = inner.search(/\s/)
-    const tag = (wsIdx < 0 ? inner : inner.slice(0, wsIdx)).trim()
-    const attrPart = wsIdx < 0 ? '' : inner.slice(wsIdx + 1)
-    const attrs = parseAttributes(attrPart)
+
+    if (next === 63 /* ? */) {
+      // <?xml … ?> processing instruction — skip
+      const end = svg.indexOf('?>', i + 2)
+      i = end < 0 ? len : end + 2
+      continue
+    }
+
+    if (next === 47 /* / */) {
+      // closing tag </name>
+      const end = svg.indexOf('>', i + 2)
+      if (end < 0) break
+      stack.pop()
+      i = end + 1
+      continue
+    }
+
+    // Opening tag `<name … >` or `<name … />`.
+    const tagStart = i + 1
+    let j = tagStart
+    while (j < len) {
+      const cc = svg.charCodeAt(j)
+      if (cc === 32 || cc === 9 || cc === 10 || cc === 13 || cc === 47 || cc === 62) break
+      j++
+    }
+    const tag = svg.slice(tagStart, j)
+    const attrs: Record<string, string> = {}
+    let selfClose = false
+
+    // Attribute loop — drains until `>` or `/>`.
+    while (j < len) {
+      c = svg.charCodeAt(j)
+      while (c === 32 || c === 9 || c === 10 || c === 13) {
+        j++
+        if (j >= len) break
+        c = svg.charCodeAt(j)
+      }
+      if (j >= len) break
+      if (c === 62 /* > */) { j++; break }
+      if (c === 47 /* / */) {
+        selfClose = true
+        // tolerant: skip until `>` (Adobe-style `<rect …/>` always matches first)
+        const gt = svg.indexOf('>', j)
+        j = gt < 0 ? len : gt + 1
+        break
+      }
+
+      const attrStart = j
+      while (j < len) {
+        const cc = svg.charCodeAt(j)
+        if (cc === 61 /* = */ || cc === 32 || cc === 9 || cc === 10 || cc === 13 || cc === 47 || cc === 62) break
+        j++
+      }
+      const attrName = svg.slice(attrStart, j)
+
+      while (j < len) {
+        const cc = svg.charCodeAt(j)
+        if (cc !== 32 && cc !== 9 && cc !== 10 && cc !== 13) break
+        j++
+      }
+
+      if (svg.charCodeAt(j) !== 61 /* = */) {
+        // Boolean / valueless attribute.
+        attrs[attrName] = ''
+        continue
+      }
+      j++
+
+      while (j < len) {
+        const cc = svg.charCodeAt(j)
+        if (cc !== 32 && cc !== 9 && cc !== 10 && cc !== 13) break
+        j++
+      }
+
+      const quote = svg.charCodeAt(j)
+      let value: string
+      if (quote === 34 /* " */) {
+        const close = svg.indexOf('"', j + 1)
+        if (close < 0) { j = len; break }
+        value = svg.slice(j + 1, close)
+        j = close + 1
+      }
+      else if (quote === 39 /* ' */) {
+        const close = svg.indexOf('\'', j + 1)
+        if (close < 0) { j = len; break }
+        value = svg.slice(j + 1, close)
+        j = close + 1
+      }
+      else {
+        // unquoted
+        const start = j
+        while (j < len) {
+          const cc = svg.charCodeAt(j)
+          if (cc === 32 || cc === 9 || cc === 10 || cc === 13 || cc === 47 || cc === 62) break
+          j++
+        }
+        value = svg.slice(start, j)
+      }
+      attrs[attrName] = decodeEntities(value)
+    }
+
     const node: RawElement = { tag, attrs, children: [] }
     if (stack.length === 0) root = node
     else stack[stack.length - 1]!.children.push(node)
     if (!selfClose && !SELF_CLOSING.has(tag)) {
       stack.push(node)
     }
-    i = gt + 1
+    i = j
   }
   return root
 }
@@ -182,41 +309,121 @@ function parseNumber(v: string | undefined, fallback = 0): number {
  */
 function parseLengthPercent(v: string | undefined, base: number, fallback = 0): number {
   if (v == null) return fallback
-  const t = v.trim()
-  if (t.endsWith('%')) {
-    const n = Number.parseFloat(t.slice(0, -1))
-    return Number.isFinite(n) ? (n / 100) * base : fallback
+  // Skip leading whitespace.
+  const len = v.length
+  let i = 0
+  while (i < len) {
+    const c = v.charCodeAt(i)
+    if (c === 32 || c === 9 || c === 10 || c === 13) i++
+    else break
   }
-  const n = Number.parseFloat(t)
+  if (i >= len) return fallback
+  const numStart = i
+  const sc = v.charCodeAt(i)
+  if (sc === 43 || sc === 45) i++
+  let sawDigit = false
+  let sawDot = false
+  while (i < len) {
+    const c = v.charCodeAt(i)
+    if (c >= 48 && c <= 57) { sawDigit = true; i++ }
+    else if (c === 46 && !sawDot) { sawDot = true; i++ }
+    else break
+  }
+  if (i < len) {
+    const ec = v.charCodeAt(i)
+    if (ec === 101 || ec === 69) {
+      i++
+      const ssc = v.charCodeAt(i)
+      if (ssc === 43 || ssc === 45) i++
+      while (i < len) {
+        const c = v.charCodeAt(i)
+        if (c >= 48 && c <= 57) i++
+        else break
+      }
+    }
+  }
+  if (!sawDigit) return fallback
+  const n = Number.parseFloat(v.slice(numStart, i))
   if (!Number.isFinite(n)) return fallback
-  // Strip the leading number to inspect any unit suffix.
-  const unit = t.slice(String(n).length).trim().toLowerCase()
-  switch (unit) {
-    case '':
-    case 'px':
-      return n
-    case 'pt': return n * (96 / 72)
-    case 'pc': return n * (96 / 6)
-    case 'in': return n * 96
-    case 'cm': return n * (96 / 2.54)
-    case 'mm': return n * (96 / 25.4)
-    case 'q': return n * (96 / 101.6)
-    case 'em':
-    case 'rem':
-    case 'ex':
-    case 'ch':
-      return n * 16 // crude — no font-size cascade yet
-    default:
-      return n
+
+  // Skip optional whitespace before unit suffix.
+  while (i < len) {
+    const c = v.charCodeAt(i)
+    if (c === 32 || c === 9 || c === 10 || c === 13) i++
+    else break
   }
+  if (i >= len) return n
+  const u0 = v.charCodeAt(i)
+  // '%'  → percent of base
+  if (u0 === 37) return (n / 100) * base
+  // Two-letter units (px, pt, pc, in, cm, mm, em, ex, ch, rem-prefix 're')
+  const u1 = i + 1 < len ? v.charCodeAt(i + 1) : 0
+  // Lowercase via OR with 0x20 (only valid for ASCII letters).
+  const a = u0 | 0x20
+  const b = u1 | 0x20
+  // px
+  if (a === 112 && b === 120) return n
+  // pt
+  if (a === 112 && b === 116) return n * (96 / 72)
+  // pc
+  if (a === 112 && b === 99) return n * (96 / 6)
+  // in
+  if (a === 105 && b === 110) return n * 96
+  // cm
+  if (a === 99 && b === 109) return n * (96 / 2.54)
+  // mm
+  if (a === 109 && b === 109) return n * (96 / 25.4)
+  // q (single letter)
+  if (a === 113 && (u1 === 0 || u1 === 32)) return n * (96 / 101.6)
+  // em, ex, ch — treated as 16
+  if ((a === 101 && (b === 109 || b === 120)) || (a === 99 && b === 104)) return n * 16
+  // rem — three letters
+  if (a === 114 && b === 101 && i + 2 < len && (v.charCodeAt(i + 2) | 0x20) === 109) return n * 16
+  return n
 }
 
 function parsePoints(v: string): Array<[number, number]> {
   const out: Array<[number, number]> = []
-  const nums = v.split(/[\s,]+/).filter(Boolean).map(Number)
-  for (let i = 0; i + 1 < nums.length; i += 2) {
-    const x = nums[i]!, y = nums[i + 1]!
-    if (Number.isFinite(x) && Number.isFinite(y)) out.push([x, y])
+  if (v == null || v.length === 0) return out
+  const len = v.length
+  let i = 0
+  let pending: number | null = null
+  while (i < len) {
+    let c = v.charCodeAt(i)
+    while (c === 32 || c === 9 || c === 10 || c === 13 || c === 44) {
+      i++
+      if (i >= len) break
+      c = v.charCodeAt(i)
+    }
+    if (i >= len) break
+    const start = i
+    if (c === 43 || c === 45) i++
+    let sawDigit = false
+    let sawDot = false
+    while (i < len) {
+      const cc = v.charCodeAt(i)
+      if (cc >= 48 && cc <= 57) { sawDigit = true; i++ }
+      else if (cc === 46 && !sawDot) { sawDot = true; i++ }
+      else break
+    }
+    if (i < len) {
+      const ec = v.charCodeAt(i)
+      if (ec === 101 || ec === 69) {
+        i++
+        const sc = v.charCodeAt(i)
+        if (sc === 43 || sc === 45) i++
+        while (i < len) {
+          const cc = v.charCodeAt(i)
+          if (cc >= 48 && cc <= 57) i++
+          else break
+        }
+      }
+    }
+    if (!sawDigit) break
+    const n = Number.parseFloat(v.slice(start, i))
+    if (!Number.isFinite(n)) continue
+    if (pending == null) pending = n
+    else { out.push([pending, n]); pending = null }
   }
   return out
 }
@@ -326,9 +533,13 @@ function pickStyle(rawAttrs: Record<string, string>): StyleAttrs {
   // Inline style attribute is "k: v; k: v"; project it onto a local view
   // without mutating the source attrs map (callers preserve `attrs` on the
   // node and shouldn't see synthetic keys back-written from `style`).
-  const attrs: Record<string, string> = { ...rawAttrs }
-  const style = attrs.style
+  //
+  // Hot path: most elements have NO `style="…"` attribute, so we can skip
+  // the shallow clone entirely. Only build a merged map when style is set.
+  const style = rawAttrs.style
+  let attrs: Record<string, string>
   if (style) {
+    attrs = { ...rawAttrs }
     for (const decl of style.split(';')) {
       const idx = decl.indexOf(':')
       if (idx < 0) continue
@@ -336,6 +547,9 @@ function pickStyle(rawAttrs: Record<string, string>): StyleAttrs {
       const v = decl.slice(idx + 1).trim()
       if (!(k in attrs)) attrs[k] = v
     }
+  }
+  else {
+    attrs = rawAttrs
   }
   const out: StyleAttrs = {}
   if ('fill' in attrs) {
@@ -407,7 +621,10 @@ function pickStyle(rawAttrs: Record<string, string>): StyleAttrs {
 }
 
 function buildNode(raw: RawElement, vbWidth: number, vbHeight: number): SVGNode | null {
-  const attrs = { ...raw.attrs }
+  // raw.attrs is owned by this raw element and not shared, so we can read
+  // from it directly without cloning. pickStyle() makes its own internal
+  // shallow copy for style-decl projection.
+  const attrs = raw.attrs
   const style = pickStyle(attrs)
   const baseFields = {
     attrs,

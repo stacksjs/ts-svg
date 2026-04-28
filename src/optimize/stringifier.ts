@@ -229,12 +229,31 @@ function stringifyElement(node: XastElement, config: ResolvedOptions, state: Sta
   )
 }
 
+// Default attribute-value entity set — `& " < >`. Anything else can use the
+// generic .replace() path. Hot path uses indexOf checks so the regex never
+// runs for the overwhelming majority of values that contain none of these.
+function encodeValueDefault(s: string): string {
+  if (s.indexOf('&') < 0 && s.indexOf('"') < 0 && s.indexOf('<') < 0 && s.indexOf('>') < 0)
+    return s
+  return s.replace(DEFAULTS.regValEntities, defaultEncodeEntity)
+}
+
+function encodeTextDefault(s: string): string {
+  if (s.indexOf('&') < 0 && s.indexOf('\'') < 0 && s.indexOf('"') < 0 && s.indexOf('<') < 0 && s.indexOf('>') < 0)
+    return s
+  return s.replace(DEFAULTS.regEntities, defaultEncodeEntity)
+}
+
 function stringifyAttributes(node: XastElement, config: ResolvedOptions): string {
   let attrs = ''
-  for (const [name, value] of Object.entries(node.attributes)) {
+  const isDefault = config.encodeEntity === defaultEncodeEntity && config.regValEntities === DEFAULTS.regValEntities
+  const attributes = node.attributes
+  for (const name in attributes) {
+    const value = attributes[name]
     attrs += ` ${name}`
     if (value !== undefined) {
-      const encoded = String(value).replace(config.regValEntities, config.encodeEntity)
+      const sval = typeof value === 'string' ? value : String(value)
+      const encoded = isDefault ? encodeValueDefault(sval) : sval.replace(config.regValEntities, config.encodeEntity)
       attrs += config.attrStart + encoded + config.attrEnd
     }
   }
@@ -242,10 +261,12 @@ function stringifyAttributes(node: XastElement, config: ResolvedOptions): string
 }
 
 function stringifyText(node: XastText, config: ResolvedOptions, state: State): string {
+  const isDefault = config.encodeEntity === defaultEncodeEntity && config.regEntities === DEFAULTS.regEntities
+  const encoded = isDefault ? encodeTextDefault(node.value) : node.value.replace(config.regEntities, config.encodeEntity)
   return (
     createIndent(config, state)
     + config.textStart
-    + node.value.replace(config.regEntities, config.encodeEntity)
+    + encoded
     + (state.textContext ? '' : config.textEnd)
   )
 }

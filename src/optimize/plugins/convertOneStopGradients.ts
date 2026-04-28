@@ -65,7 +65,7 @@ export const fn: Plugin = (root) => {
               delete element.attributes[attr]
           }
         }
-        const styledElements = querySelectorAll(root, `[style*=${selectorVal}]`)
+        const styledElements = querySelectorAll(root, `[style*="${selectorVal}"]`)
         for (const element of styledElements) {
           if (element.type !== 'element')
             continue

@@ -206,9 +206,11 @@ export function includesAttrSelector(
   value: string | null = null,
   traversed: boolean = false,
 ): boolean {
+  // SVG attribute names are case-sensitive (e.g. `preserveAspectRatio`),
+  // so we parse selectors in xmlMode to keep the casing intact.
   const selectors = typeof selector === 'string'
-    ? csswhat.parse(selector)
-    : csswhat.parse(csstree.generate(selector.data))
+    ? csswhat.parse(selector, { xmlMode: true })
+    : csswhat.parse(csstree.generate(selector.data), { xmlMode: true })
 
   for (const subselector of selectors) {
     const hasAttrSelector = subselector.some((segment, index) => {

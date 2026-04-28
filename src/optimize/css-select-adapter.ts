@@ -14,8 +14,18 @@ function getChildren(node: XastNode): XastNode[] {
   return (node as XastParent).children ?? []
 }
 
+function isParent(node: XastNode): boolean {
+  return node.type === 'element' || node.type === 'root'
+}
+
 function existsOne(test: (e: XastElement) => boolean, elems: XastNode[]): boolean {
-  return elems.some(elem => isTag(elem) && (test(elem) || existsOne(test, getChildren(elem))))
+  return elems.some((elem) => {
+    if (isTag(elem))
+      return test(elem) || existsOne(test, getChildren(elem))
+    if (isParent(elem))
+      return existsOne(test, getChildren(elem))
+    return false
+  })
 }
 
 function getAttributeValue(elem: XastElement, name: string): string | undefined {
@@ -45,6 +55,11 @@ function findAll(test: (e: XastElement) => boolean, elems: XastNode[]): XastElem
         result.push(elem)
       result.push(...findAll(test, getChildren(elem)))
     }
+    else if (isParent(elem)) {
+      // Walk through the document root (or any other non-element parent)
+      // — its children may still contain matching elements.
+      result.push(...findAll(test, getChildren(elem)))
+    }
   }
   return result
 }
@@ -54,6 +69,11 @@ function findOne(test: (e: XastElement) => boolean, elems: XastNode[]): XastElem
     if (isTag(elem)) {
       if (test(elem))
         return elem
+      const result = findOne(test, getChildren(elem))
+      if (result)
+        return result
+    }
+    else if (isParent(elem)) {
       const result = findOne(test, getChildren(elem))
       if (result)
         return result

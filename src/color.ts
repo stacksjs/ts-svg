@@ -75,6 +75,14 @@ const NAMED_MAP = new Map<string, [number, number, number]>(Object.entries(NAMED
 
 function clamp255(n: number): number { return Math.max(0, Math.min(255, Math.round(n))) }
 
+// Fast inline hex digit → 0..15. Returns -1 for non-hex.
+function hexNibble(code: number): number {
+  if (code >= 48 && code <= 57) return code - 48 // 0-9
+  if (code >= 97 && code <= 102) return code - 87 // a-f
+  if (code >= 65 && code <= 70) return code - 55 // A-F
+  return -1
+}
+
 function hslToRgb(h: number, s: number, l: number): [number, number, number] {
   // h in [0, 360), s/l in [0, 1]
   const c = (1 - Math.abs(2 * l - 1)) * s
@@ -99,35 +107,44 @@ function hslToRgb(h: number, s: number, l: number): [number, number, number] {
  * stop-opacity) without affecting `BLACK` / `TRANSPARENT` / shared constants.
  */
 export function parseColor(input: string | null | undefined, currentColor?: RGBA): RGBA {
-  if (input == null) return { ...TRANSPARENT }
-  const s = input.trim().toLowerCase()
-  if (s === 'none' || s === 'transparent') return { ...TRANSPARENT }
-  if (s === 'currentcolor') return { ...(currentColor ?? BLACK) }
-
-  if (s.startsWith('#')) {
-    const hex = s.slice(1)
-    // CSS Color spec: only 3, 4, 6, 8 hex-digit forms are valid. Anything
-    // else (e.g. `#abcde`) is invalid and resolves to transparent — NOT to
-    // black, which silently masks user errors.
-    if (hex.length !== 3 && hex.length !== 4 && hex.length !== 6 && hex.length !== 8) {
-      return { ...TRANSPARENT }
+  if (input == null) return { r: 0, g: 0, b: 0, a: 0 }
+  // Fast hex path — by far the most common shape (#rgb, #rrggbb). Avoid
+  // .trim().toLowerCase() allocation when the input is already a tight hex.
+  if (input.length > 0 && input.charCodeAt(0) === 35 /* # */) {
+    const len = input.length - 1
+    if (len === 3 || len === 6 || len === 4 || len === 8) {
+      let r = 0, g = 0, b = 0, a = 255
+      if (len === 3 || len === 4) {
+        const r4 = hexNibble(input.charCodeAt(1))
+        const g4 = hexNibble(input.charCodeAt(2))
+        const b4 = hexNibble(input.charCodeAt(3))
+        if (r4 < 0 || g4 < 0 || b4 < 0) return { r: 0, g: 0, b: 0, a: 0 }
+        r = r4 * 17; g = g4 * 17; b = b4 * 17
+        if (len === 4) {
+          const a4 = hexNibble(input.charCodeAt(4))
+          if (a4 < 0) return { r: 0, g: 0, b: 0, a: 0 }
+          a = a4 * 17
+        }
+      }
+      else {
+        const r1 = hexNibble(input.charCodeAt(1)), r2 = hexNibble(input.charCodeAt(2))
+        const g1 = hexNibble(input.charCodeAt(3)), g2 = hexNibble(input.charCodeAt(4))
+        const b1 = hexNibble(input.charCodeAt(5)), b2 = hexNibble(input.charCodeAt(6))
+        if (r1 < 0 || r2 < 0 || g1 < 0 || g2 < 0 || b1 < 0 || b2 < 0) return { r: 0, g: 0, b: 0, a: 0 }
+        r = (r1 << 4) | r2; g = (g1 << 4) | g2; b = (b1 << 4) | b2
+        if (len === 8) {
+          const a1 = hexNibble(input.charCodeAt(7)), a2 = hexNibble(input.charCodeAt(8))
+          if (a1 < 0 || a2 < 0) return { r: 0, g: 0, b: 0, a: 0 }
+          a = (a1 << 4) | a2
+        }
+      }
+      return { r, g, b, a }
     }
-    if (!/^[0-9a-f]+$/.test(hex)) return { ...TRANSPARENT }
-    let r = 0, g = 0, b = 0, a = 255
-    if (hex.length === 3 || hex.length === 4) {
-      r = Number.parseInt(hex[0]! + hex[0], 16)
-      g = Number.parseInt(hex[1]! + hex[1], 16)
-      b = Number.parseInt(hex[2]! + hex[2], 16)
-      if (hex.length === 4) a = Number.parseInt(hex[3]! + hex[3], 16)
-    }
-    else {
-      r = Number.parseInt(hex.slice(0, 2), 16)
-      g = Number.parseInt(hex.slice(2, 4), 16)
-      b = Number.parseInt(hex.slice(4, 6), 16)
-      if (hex.length === 8) a = Number.parseInt(hex.slice(6, 8), 16)
-    }
-    return { r: clamp255(r), g: clamp255(g), b: clamp255(b), a: clamp255(a) }
+    return { r: 0, g: 0, b: 0, a: 0 }
   }
+  const s = input.trim().toLowerCase()
+  if (s === 'none' || s === 'transparent') return { r: 0, g: 0, b: 0, a: 0 }
+  if (s === 'currentcolor') return currentColor ? { r: currentColor.r, g: currentColor.g, b: currentColor.b, a: currentColor.a } : { r: 0, g: 0, b: 0, a: 255 }
 
   const rgbm = s.match(/^rgba?\s*\(([^)]+)\)$/)
   if (rgbm) {
@@ -156,7 +173,7 @@ export function parseColor(input: string | null | undefined, currentColor?: RGBA
     // silently through `Math.cos`/`% 360` and ends up baking NaN bytes into
     // the framebuffer, where they dim the image and corrupt blends.
     if (!Number.isFinite(hRaw) || !Number.isFinite(sRaw) || !Number.isFinite(lRaw)) {
-      return { ...TRANSPARENT }
+      return { r: 0, g: 0, b: 0, a: 0 }
     }
     const a = parts.length >= 4
       ? (parts[3]!.endsWith('%')
@@ -171,5 +188,5 @@ export function parseColor(input: string | null | undefined, currentColor?: RGBA
   const named = NAMED_MAP.get(s)
   if (named) return { r: named[0], g: named[1], b: named[2], a: 255 }
 
-  return { ...TRANSPARENT }
+  return { r: 0, g: 0, b: 0, a: 0 }
 }

@@ -33,67 +33,53 @@ export function createFramebuffer(width: number, height: number, bg: RGBA): Fram
   return { width, height, data }
 }
 
-interface Edge {
-  /** Top y (inclusive). */
-  yTop: number
-  /** Bottom y (exclusive). */
-  yBot: number
-  /** Current x (at yTop). */
-  x: number
-  /** Slope dx/dy. */
-  dxdy: number
-  /** +1 if going down (increasing y), -1 if going up (for non-zero winding). */
-  winding: number
-}
-
-/** Build edges from a flat polygon `[x0, y0, x1, y1, ...]`. */
-function polygonToEdges(poly: number[]): Edge[] {
-  const edges: Edge[] = []
-  const n = poly.length / 2
-  for (let i = 0; i < n; i++) {
-    const j = (i + 1) % n
-    const ax = poly[i * 2]!, ay = poly[i * 2 + 1]!
-    const bx = poly[j * 2]!, by = poly[j * 2 + 1]!
-    if (ay === by) continue // horizontal — contributes nothing
-    if (ax === bx && ay === by) continue // zero-length, defensive (degenerate paths)
-    if (ay < by) {
-      edges.push({
-        yTop: ay,
-        yBot: by,
-        x: ax,
-        dxdy: (bx - ax) / (by - ay),
-        winding: 1,
-      })
-    }
-    else {
-      edges.push({
-        yTop: by,
-        yBot: ay,
-        x: bx,
-        dxdy: (ax - bx) / (ay - by),
-        winding: -1,
-      })
-    }
-  }
-  return edges
-}
-
 /**
  * Composite an RGBA value over a single pixel of the framebuffer with the
  * given coverage in [0, 1].
+ *
+ * Hot path: source-over blending on every covered pixel of every shape.
+ * Three fast paths:
+ *  - opaque source over empty destination (a == 255 && dstA == 0): straight write
+ *  - opaque source (a == 255): premultiplied lerp by coverage with integer math
+ *  - general: full source-over with float math
  */
 function blendPixel(fb: Framebuffer, x: number, y: number, color: RGBA, coverage: number): void {
   if (coverage <= 0) return
   if (x < 0 || y < 0 || x >= fb.width || y >= fb.height) return
+  const data = fb.data
   const idx = (y * fb.width + x) * 4
-  const srcA = color.a * coverage / 255
-  const dstA = fb.data[idx + 3]! / 255
-  const outA = srcA + dstA * (1 - srcA)
+  const srcAlpha = color.a
+  if (srcAlpha === 255 && coverage >= 1) {
+    // Fully opaque source covering full pixel — straight write.
+    data[idx] = color.r
+    data[idx + 1] = color.g
+    data[idx + 2] = color.b
+    data[idx + 3] = 255
+    return
+  }
+  // 0..255 source coverage value.
+  const srcA255 = (srcAlpha * coverage) | 0
+  if (srcA255 === 0) return
+  const dstA = data[idx + 3]!
+  if (dstA === 0) {
+    // Empty destination — straight write w/ coverage as alpha (no blend).
+    data[idx] = color.r
+    data[idx + 1] = color.g
+    data[idx + 2] = color.b
+    data[idx + 3] = srcA255
+    return
+  }
+  // General source-over.
+  const srcA = srcA255 / 255
+  const dstAf = dstA / 255
+  const oneMinus = 1 - srcA
+  const outA = srcA + dstAf * oneMinus
   if (outA === 0) return
-  fb.data[idx]     = Math.round((color.r * srcA + fb.data[idx]!     * dstA * (1 - srcA)) / outA)
-  fb.data[idx + 1] = Math.round((color.g * srcA + fb.data[idx + 1]! * dstA * (1 - srcA)) / outA)
-  fb.data[idx + 2] = Math.round((color.b * srcA + fb.data[idx + 2]! * dstA * (1 - srcA)) / outA)
-  fb.data[idx + 3] = Math.round(outA * 255)
+  const inv = 1 / outA
+  data[idx]     = ((color.r * srcA + data[idx]!     * dstAf * oneMinus) * inv + 0.5) | 0
+  data[idx + 1] = ((color.g * srcA + data[idx + 1]! * dstAf * oneMinus) * inv + 0.5) | 0
+  data[idx + 2] = ((color.b * srcA + data[idx + 2]! * dstAf * oneMinus) * inv + 0.5) | 0
+  data[idx + 3] = ((outA * 255) + 0.5) | 0
 }
 
 /**
@@ -114,98 +100,140 @@ export function fillPolygons(
   fillRule: 'nonzero' | 'evenodd' = 'nonzero',
 ): void {
   if (polys.length === 0) return
-  if (isSolid(paint) && paint.a === 0) return
+  const solid = isSolid(paint) ? paint : null
+  if (solid && solid.a === 0) return
 
   const SAMPLES = 4
   const sampleW = 1 / SAMPLES
+  const fbW = fb.width
+  const fbH = fb.height
+  const isEvenOdd = fillRule === 'evenodd'
 
-  // Build all edges in sub-pixel y-space.
-  const allEdges: Edge[][] = []
-  for (let s = 0; s < SAMPLES; s++) allEdges.push([])
+  // Per-row buckets indexed [row * SAMPLES + sampleIdx]. Each bucket is a
+  // flat number array: [x0, w0, x1, w1, ...]. Allocated lazily.
+  const buckets: Array<number[] | undefined> = new Array(fbH * SAMPLES)
+  // Track which rows actually had work — saves scanning empty rows of large fbs.
+  const dirtyRows: number[] = []
+  const rowSeen = new Uint8Array(fbH)
 
-  for (const poly of polys) {
-    const e = polygonToEdges(poly)
-    for (const edge of e) {
-      // Determine which sample lines this edge crosses.
-      const yTopSub = Math.floor(edge.yTop * SAMPLES)
-      const yBotSub = Math.ceil(edge.yBot * SAMPLES)
+  // Build edges directly into per-sample-line buckets.
+  for (let pi = 0; pi < polys.length; pi++) {
+    const poly = polys[pi]!
+    const np = poly.length / 2
+    for (let i = 0; i < np; i++) {
+      const j = (i + 1) % np
+      const ax = poly[i * 2]!, ay = poly[i * 2 + 1]!
+      const bx = poly[j * 2]!, by = poly[j * 2 + 1]!
+      if (ay === by) continue // horizontal — contributes nothing
+      let yTop: number, yBot: number, xTop: number, dxdy: number, winding: number
+      if (ay < by) {
+        yTop = ay; yBot = by; xTop = ax
+        dxdy = (bx - ax) / (by - ay)
+        winding = 1
+      }
+      else {
+        yTop = by; yBot = ay; xTop = bx
+        dxdy = (ax - bx) / (ay - by)
+        winding = -1
+      }
+      const yTopSub = Math.floor(yTop * SAMPLES)
+      const yBotSub = Math.ceil(yBot * SAMPLES)
       for (let ys = yTopSub; ys < yBotSub; ys++) {
         const yReal = (ys + 0.5) / SAMPLES
-        if (yReal < edge.yTop || yReal >= edge.yBot) continue
-        const x = edge.x + edge.dxdy * (yReal - edge.yTop)
-        // Bucket by sample-line index modulo SAMPLES (within the pixel row).
-        const sampleIdx = ys % SAMPLES
-        const targetRow = Math.floor(ys / SAMPLES)
-        if (targetRow < 0 || targetRow >= fb.height) continue
-        // Reuse Edge struct: store crossing as a "vertical edge" at scanline targetRow.
-        // We'll instead collect crossings directly.
-        allEdges[(sampleIdx + SAMPLES) % SAMPLES]!.push({
-          yTop: targetRow, yBot: targetRow + 1, x, dxdy: 0, winding: edge.winding,
-        })
+        if (yReal < yTop || yReal >= yBot) continue
+        const targetRow = ys >= 0 ? (ys / SAMPLES) | 0 : Math.floor(ys / SAMPLES)
+        if (targetRow < 0 || targetRow >= fbH) continue
+        const sampleIdx = ((ys % SAMPLES) + SAMPLES) % SAMPLES
+        const x = xTop + dxdy * (yReal - yTop)
+        const bIdx = targetRow * SAMPLES + sampleIdx
+        let bucket = buckets[bIdx]
+        if (bucket === undefined) {
+          bucket = []
+          buckets[bIdx] = bucket
+        }
+        bucket.push(x, winding)
+        if (rowSeen[targetRow] === 0) {
+          rowSeen[targetRow] = 1
+          dirtyRows.push(targetRow)
+        }
       }
     }
   }
 
-  // For each scanline (pixel row), we need crossings per sub-sample, then
-  // we accumulate coverage per pixel from "inside" segments.
-  // Group crossings by row.
-  const crossingsByRow: Map<number, Array<{ x: number, w: number, sample: number }>> = new Map()
-  for (let s = 0; s < SAMPLES; s++) {
-    for (const e of allEdges[s]!) {
-      let arr = crossingsByRow.get(e.yTop)
-      if (!arr) { arr = []; crossingsByRow.set(e.yTop, arr) }
-      arr.push({ x: e.x, w: e.winding, sample: s })
-    }
-  }
+  // Reusable per-row coverage buffer. Only the leftmost..rightmost touched
+  // pixel range needs to be scanned/cleared each row.
+  const cov = new Float32Array(fbW)
 
-  for (const [row, raw] of crossingsByRow) {
-    if (row < 0 || row >= fb.height) continue
+  for (let r = 0; r < dirtyRows.length; r++) {
+    const row = dirtyRows[r]!
+    let minPx = fbW
+    let maxPx = -1
 
-    // Per-sample coverage stripes
-    const stripes = new Map<number, Array<{ x: number, w: number }>>()
-    for (const c of raw) {
-      let arr = stripes.get(c.sample)
-      if (!arr) { arr = []; stripes.set(c.sample, arr) }
-      arr.push({ x: c.x, w: c.w })
-    }
+    for (let s = 0; s < SAMPLES; s++) {
+      const list = buckets[row * SAMPLES + s]
+      if (list === undefined) continue
+      // In-place insertion sort over (x, w) pairs — typical bucket has a
+      // handful of crossings, so this is O(n) faster than Array.sort with a
+      // boxed comparator allocation.
+      const m = list.length
+      for (let i = 2; i < m; i += 2) {
+        const x = list[i]!
+        const w = list[i + 1]!
+        let k = i - 2
+        while (k >= 0 && list[k]! > x) {
+          list[k + 2] = list[k]!
+          list[k + 3] = list[k + 1]!
+          k -= 2
+        }
+        list[k + 2] = x
+        list[k + 3] = w
+      }
 
-    // Accumulate per-pixel coverage.
-    // For each sample line, walk its sorted crossings tracking winding,
-    // and add `1/SAMPLES` to each pixel where the fill rule says "inside",
-    // weighted by the fraction of the pixel between the two crossings.
-    const pixCoverage = new Map<number, number>()
-    for (const [, list] of stripes) {
-      list.sort((a, b) => a.x - b.x)
       let winding = 0
       let parity = 0
       let prev = 0
       let prevInside = false
-      for (const c of list) {
+      for (let i = 0; i < m; i += 2) {
+        const cx = list[i]!
+        const cw = list[i + 1]!
         if (prevInside) {
-          const a = Math.max(0, prev)
-          const b = Math.min(fb.width, c.x)
+          let a = prev
+          if (a < 0) a = 0
+          let b = cx
+          if (b > fbW) b = fbW
           if (b > a) {
-            const xa = Math.floor(a)
-            const xb = Math.floor(b)
-            for (let px = xa; px <= xb; px++) {
-              const segL = Math.max(a, px)
-              const segR = Math.min(b, px + 1)
-              if (segR > segL) {
-                pixCoverage.set(px, (pixCoverage.get(px) ?? 0) + (segR - segL) * sampleW)
-              }
+            const xa = a | 0
+            const xb = b | 0
+            if (xa < minPx) minPx = xa
+            if (xb > maxPx) maxPx = xb
+            if (xa === xb) {
+              cov[xa]! += (b - a) * sampleW
+            }
+            else {
+              cov[xa]! += (xa + 1 - a) * sampleW
+              for (let px = xa + 1; px < xb; px++) cov[px]! += sampleW
+              cov[xb]! += (b - xb) * sampleW
             }
           }
         }
-        winding += c.w
+        winding += cw
         parity ^= 1
-        prevInside = fillRule === 'evenodd' ? parity === 1 : winding !== 0
-        prev = c.x
+        prevInside = isEvenOdd ? parity === 1 : winding !== 0
+        prev = cx
       }
     }
 
-    for (const [px, cov] of pixCoverage) {
-      const c = isSolid(paint) ? paint : paint.sample(px + 0.5, row + 0.5)
-      blendPixel(fb, px, row, c, Math.min(1, cov))
+    if (maxPx >= 0) {
+      if (maxPx >= fbW) maxPx = fbW - 1
+      const sampleFn = solid ? null : (paint as { sample: (x: number, y: number) => RGBA }).sample
+      for (let px = minPx; px <= maxPx; px++) {
+        const c = cov[px]!
+        if (c > 0) {
+          const color = solid ?? sampleFn!(px + 0.5, row + 0.5)
+          blendPixel(fb, px, row, color, c < 1 ? c : 1)
+          cov[px] = 0
+        }
+      }
     }
   }
 }

@@ -106,84 +106,172 @@ class PathLex {
   }
 }
 
-/** Parse an SVG path `d` string into absolute-coordinate commands. */
+/**
+ * Parse an SVG path `d` string into absolute-coordinate commands.
+ *
+ * Inlined scanner — no class dispatch, no per-number `slice()` allocation
+ * (numbers are read by direct charCode-driven boundary detection then
+ * `parseFloat(slice)` only once at the end of the run, since V8's
+ * parseFloat over a substring is significantly faster than over the full
+ * string with a starting position).
+ */
 export function parsePath(d: string): PathCmd[] {
   const out: PathCmd[] = []
-  let cx = 0, cy = 0 // current point
-  let startX = 0, startY = 0 // subpath start
-  let prevC2x = 0, prevC2y = 0 // previous cubic control2 (for S/s)
-  let prevQ1x = 0, prevQ1y = 0 // previous quadratic control1 (for T/t)
-  let prevCmd = ''
-  const lex = new PathLex(d)
+  if (d == null || d.length === 0) return out
+  const s = d
+  const len = s.length
+  let pos = 0
+  let cx = 0, cy = 0
+  let startX = 0, startY = 0
+  let prevC2x = 0, prevC2y = 0
+  let prevQ1x = 0, prevQ1y = 0
+  let prevCmd = 0 // ASCII upper-case code; 0 = none
 
-  /** Detect whether the next non-whitespace char is the start of a number
-   * (digit, sign, or decimal point) — used to honour the implicit-repeat
-   * rule (e.g. `M 0 0 10 10` = `M 0 0 L 10 10`). */
+  // Skip whitespace + commas. Inlined.
+  const skipWs = (): void => {
+    while (pos < len) {
+      const c = s.charCodeAt(pos)
+      if (c === 32 || c === 9 || c === 10 || c === 13 || c === 44) pos++
+      else break
+    }
+  }
+
+  // Read one signed number. Throws on malformed input.
+  const readNumber = (): number => {
+    while (pos < len) {
+      const c = s.charCodeAt(pos)
+      if (c === 32 || c === 9 || c === 10 || c === 13 || c === 44) pos++
+      else break
+    }
+    const start = pos
+    if (pos < len) {
+      const sc = s.charCodeAt(pos)
+      if (sc === 43 || sc === 45) pos++
+    }
+    let sawDigit = false
+    let sawDot = false
+    while (pos < len) {
+      const c = s.charCodeAt(pos)
+      if (c >= 48 && c <= 57) { sawDigit = true; pos++ }
+      else if (c === 46 && !sawDot) { sawDot = true; pos++ }
+      else break
+    }
+    if (pos < len) {
+      const ec = s.charCodeAt(pos)
+      if (ec === 101 || ec === 69) {
+        pos++
+        const sc = s.charCodeAt(pos)
+        if (sc === 43 || sc === 45) pos++
+        while (pos < len) {
+          const c = s.charCodeAt(pos)
+          if (c >= 48 && c <= 57) pos++
+          else break
+        }
+      }
+    }
+    if (!sawDigit) {
+      throw new Error(`parsePath: expected number at offset ${start}, got ${JSON.stringify(s[start] ?? 'EOF')}`)
+    }
+    return Number.parseFloat(s.slice(start, pos))
+  }
+
+  // Read one arc flag (must be exactly '0' or '1'); spec: no decimal.
+  const readFlag = (): 0 | 1 => {
+    while (pos < len) {
+      const c = s.charCodeAt(pos)
+      if (c === 32 || c === 9 || c === 10 || c === 13 || c === 44) pos++
+      else break
+    }
+    if (pos >= len) throw new Error(`parsePath: expected arc flag, got EOF`)
+    const c = s.charCodeAt(pos)
+    if (c !== 48 && c !== 49) {
+      throw new Error(`parsePath: expected arc flag (0 or 1) at offset ${pos}, got ${JSON.stringify(s[pos])}`)
+    }
+    pos++
+    return c === 49 ? 1 : 0
+  }
+
+  // True iff the next non-whitespace byte starts a number.
   const nextIsNumber = (): boolean => {
-    const c = lex.peek()
-    return (c >= 48 && c <= 57) || c === 43 /* + */ || c === 45 /* - */ || c === 46 /* . */
+    while (pos < len) {
+      const c = s.charCodeAt(pos)
+      if (c === 32 || c === 9 || c === 10 || c === 13 || c === 44) pos++
+      else break
+    }
+    if (pos >= len) return false
+    const c = s.charCodeAt(pos)
+    return (c >= 48 && c <= 57) || c === 43 || c === 45 || c === 46
   }
 
   while (true) {
-    const cmd = lex.readCmd()
-    if (cmd == null) break
-    const rel = cmd === cmd.toLowerCase()
-    const upper = cmd.toUpperCase()
+    skipWs()
+    if (pos >= len) break
+    const cmdCode = s.charCodeAt(pos)
+    let upperCode = cmdCode
+    let rel = false
+    if (cmdCode >= 97 && cmdCode <= 122) {
+      upperCode = cmdCode - 32
+      rel = true
+    }
+    else if (!(cmdCode >= 65 && cmdCode <= 90)) {
+      // not a letter — bail to avoid infinite loop on garbage
+      break
+    }
+    pos++
     let first = true
 
     do {
-      switch (upper) {
-        case 'M': {
-          let x = lex.readNumber(), y = lex.readNumber()
+      switch (upperCode) {
+        case 77: { // M
+          let x = readNumber(), y = readNumber()
           if (rel) { x += cx; y += cy }
           if (first) {
             out.push({ t: 'M', x, y })
             startX = x; startY = y
           }
           else {
-            // Implicit lineto after the first M coord pair
             out.push({ t: 'L', x, y })
           }
           cx = x; cy = y
           break
         }
-        case 'L': {
-          let x = lex.readNumber(), y = lex.readNumber()
+        case 76: { // L
+          let x = readNumber(), y = readNumber()
           if (rel) { x += cx; y += cy }
           out.push({ t: 'L', x, y })
           cx = x; cy = y
           break
         }
-        case 'H': {
-          let x = lex.readNumber()
+        case 72: { // H
+          let x = readNumber()
           if (rel) x += cx
           out.push({ t: 'L', x, y: cy })
           cx = x
           break
         }
-        case 'V': {
-          let y = lex.readNumber()
+        case 86: { // V
+          let y = readNumber()
           if (rel) y += cy
           out.push({ t: 'L', x: cx, y })
           cy = y
           break
         }
-        case 'C': {
-          let x1 = lex.readNumber(), y1 = lex.readNumber()
-          let x2 = lex.readNumber(), y2 = lex.readNumber()
-          let x = lex.readNumber(), y = lex.readNumber()
+        case 67: { // C
+          let x1 = readNumber(), y1 = readNumber()
+          let x2 = readNumber(), y2 = readNumber()
+          let x = readNumber(), y = readNumber()
           if (rel) { x1 += cx; y1 += cy; x2 += cx; y2 += cy; x += cx; y += cy }
           out.push({ t: 'C', x1, y1, x2, y2, x, y })
           prevC2x = x2; prevC2y = y2
           cx = x; cy = y
           break
         }
-        case 'S': {
-          let x2 = lex.readNumber(), y2 = lex.readNumber()
-          let x = lex.readNumber(), y = lex.readNumber()
+        case 83: { // S
+          let x2 = readNumber(), y2 = readNumber()
+          let x = readNumber(), y = readNumber()
           if (rel) { x2 += cx; y2 += cy; x += cx; y += cy }
           let x1 = cx, y1 = cy
-          if (prevCmd === 'C' || prevCmd === 'S') {
+          if (prevCmd === 67 /* C */ || prevCmd === 83 /* S */) {
             x1 = 2 * cx - prevC2x
             y1 = 2 * cy - prevC2y
           }
@@ -192,20 +280,20 @@ export function parsePath(d: string): PathCmd[] {
           cx = x; cy = y
           break
         }
-        case 'Q': {
-          let x1 = lex.readNumber(), y1 = lex.readNumber()
-          let x = lex.readNumber(), y = lex.readNumber()
+        case 81: { // Q
+          let x1 = readNumber(), y1 = readNumber()
+          let x = readNumber(), y = readNumber()
           if (rel) { x1 += cx; y1 += cy; x += cx; y += cy }
           out.push({ t: 'Q', x1, y1, x, y })
           prevQ1x = x1; prevQ1y = y1
           cx = x; cy = y
           break
         }
-        case 'T': {
-          let x = lex.readNumber(), y = lex.readNumber()
+        case 84: { // T
+          let x = readNumber(), y = readNumber()
           if (rel) { x += cx; y += cy }
           let x1 = cx, y1 = cy
-          if (prevCmd === 'Q' || prevCmd === 'T') {
+          if (prevCmd === 81 /* Q */ || prevCmd === 84 /* T */) {
             x1 = 2 * cx - prevQ1x
             y1 = 2 * cy - prevQ1y
           }
@@ -214,32 +302,29 @@ export function parsePath(d: string): PathCmd[] {
           cx = x; cy = y
           break
         }
-        case 'A': {
-          // SVG spec: rx, ry are non-negative numbers; rot is any number;
-          // largeArc and sweep are EXACTLY one character '0' or '1' (no
-          // implicit decimal absorption — `A1 1 0 00 5 5` is valid).
-          const rx = Math.abs(lex.readNumber())
-          const ry = Math.abs(lex.readNumber())
-          const rot = lex.readNumber()
-          const largeArc = lex.readFlag() === 1
-          const sweep = lex.readFlag() === 1
-          let x = lex.readNumber(), y = lex.readNumber()
+        case 65: { // A
+          const rx = Math.abs(readNumber())
+          const ry = Math.abs(readNumber())
+          const rot = readNumber()
+          const largeArc = readFlag() === 1
+          const sweep = readFlag() === 1
+          let x = readNumber(), y = readNumber()
           if (rel) { x += cx; y += cy }
           out.push({ t: 'A', rx, ry, xAxisRot: rot, largeArc, sweep, x, y })
           cx = x; cy = y
           break
         }
-        case 'Z': {
+        case 90: { // Z
           out.push({ t: 'Z' })
           cx = startX; cy = startY
           break
         }
         default:
-          throw new Error(`parsePath: unknown command ${JSON.stringify(cmd)}`)
+          throw new Error(`parsePath: unknown command ${JSON.stringify(String.fromCharCode(cmdCode))}`)
       }
-      prevCmd = upper
+      prevCmd = upperCode
       first = false
-      if (upper === 'Z') break
+      if (upperCode === 90) break
     }
     while (nextIsNumber())
   }
@@ -346,8 +431,19 @@ export function arcToCubics(
  */
 const MAX_FLATTEN_DEPTH = 16
 
+// Reused stack for iterative cubic flattening — 9 numbers per frame:
+//   x0,y0, c1x,c1y, c2x,c2y, x1,y1, depth
+// Capacity grows on demand; each `flattenCubic` call grows-and-shrinks.
+const CUBIC_STACK_FRAME = 9
+const cubicStack: number[] = []
+
 /**
  * Adaptive subdivision of a cubic Bezier into line segments.
+ *
+ * Iterative: uses a shared work-stack instead of recursion. For a path with
+ * N hard cubics, this avoids O(N × depth) function-call frames in V8 and
+ * lets the engine specialize the inner loop on monomorphic Float64 ops.
+ *
  * `tolerance` is the maximum allowed sagitta (deviation) in pixels.
  */
 export function flattenCubic(
@@ -359,34 +455,55 @@ export function flattenCubic(
   out: number[],
   depth = 0,
 ): void {
-  if (depth >= MAX_FLATTEN_DEPTH) { out.push(x1, y1); return }
-  // Estimate flatness: max distance from control points to chord.
-  const dx = x1 - x0
-  const dy = y1 - y0
-  const denom = dx * dx + dy * dy
-  let d1, d2
-  if (denom === 0) {
-    d1 = Math.hypot(c1x - x0, c1y - y0)
-    d2 = Math.hypot(c2x - x1, c2y - y1)
+  const stack = cubicStack
+  let sp = stack.length
+  // Push the initial frame.
+  stack.push(x0, y0, c1x, c1y, c2x, c2y, x1, y1, depth)
+  const baseSp = sp
+  while (stack.length > baseSp) {
+    const top = stack.length - CUBIC_STACK_FRAME
+    const fx0 = stack[top]!, fy0 = stack[top + 1]!
+    const fc1x = stack[top + 2]!, fc1y = stack[top + 3]!
+    const fc2x = stack[top + 4]!, fc2y = stack[top + 5]!
+    const fx1 = stack[top + 6]!, fy1 = stack[top + 7]!
+    const fdepth = stack[top + 8]!
+    stack.length = top
+
+    if (fdepth >= MAX_FLATTEN_DEPTH) { out.push(fx1, fy1); continue }
+    const dx = fx1 - fx0
+    const dy = fy1 - fy0
+    const denom = dx * dx + dy * dy
+    let d1: number, d2: number
+    if (denom === 0) {
+      d1 = Math.hypot(fc1x - fx0, fc1y - fy0)
+      d2 = Math.hypot(fc2x - fx1, fc2y - fy1)
+    }
+    else {
+      const inv = 1 / Math.sqrt(denom)
+      const a1 = (fc1x - fx1) * dy - (fc1y - fy1) * dx
+      const a2 = (fc2x - fx1) * dy - (fc2y - fy1) * dx
+      d1 = (a1 < 0 ? -a1 : a1) * inv
+      d2 = (a2 < 0 ? -a2 : a2) * inv
+    }
+    if ((d1 > d2 ? d1 : d2) <= tolerance) {
+      out.push(fx1, fy1)
+      continue
+    }
+    // De Casteljau split at t=0.5.
+    const m12x = (fx0 + fc1x) * 0.5, m12y = (fy0 + fc1y) * 0.5
+    const m23x = (fc1x + fc2x) * 0.5, m23y = (fc1y + fc2y) * 0.5
+    const m34x = (fc2x + fx1) * 0.5, m34y = (fc2y + fy1) * 0.5
+    const m123x = (m12x + m23x) * 0.5, m123y = (m12y + m23y) * 0.5
+    const m234x = (m23x + m34x) * 0.5, m234y = (m23y + m34y) * 0.5
+    const mx = (m123x + m234x) * 0.5, my = (m123y + m234y) * 0.5
+    // Push RIGHT half first so LEFT half is processed first (LIFO).
+    stack.push(mx, my, m234x, m234y, m34x, m34y, fx1, fy1, fdepth + 1)
+    stack.push(fx0, fy0, m12x, m12y, m123x, m123y, mx, my, fdepth + 1)
   }
-  else {
-    d1 = Math.abs((c1x - x1) * dy - (c1y - y1) * dx) / Math.sqrt(denom)
-    d2 = Math.abs((c2x - x1) * dy - (c2y - y1) * dx) / Math.sqrt(denom)
-  }
-  if (Math.max(d1, d2) <= tolerance) {
-    out.push(x1, y1)
-    return
-  }
-  // De Casteljau split at t=0.5
-  const m12x = (x0 + c1x) / 2, m12y = (y0 + c1y) / 2
-  const m23x = (c1x + c2x) / 2, m23y = (c1y + c2y) / 2
-  const m34x = (c2x + x1) / 2, m34y = (c2y + y1) / 2
-  const m123x = (m12x + m23x) / 2, m123y = (m12y + m23y) / 2
-  const m234x = (m23x + m34x) / 2, m234y = (m23y + m34y) / 2
-  const mx = (m123x + m234x) / 2, my = (m123y + m234y) / 2
-  flattenCubic(x0, y0, m12x, m12y, m123x, m123y, mx, my, tolerance, out, depth + 1)
-  flattenCubic(mx, my, m234x, m234y, m34x, m34y, x1, y1, tolerance, out, depth + 1)
 }
+
+const QUAD_STACK_FRAME = 7
+const quadStack: number[] = []
 
 /** Adaptive subdivision of a quadratic Bezier into line segments. */
 export function flattenQuadratic(
@@ -397,23 +514,33 @@ export function flattenQuadratic(
   out: number[],
   depth = 0,
 ): void {
-  if (depth >= MAX_FLATTEN_DEPTH) { out.push(x1, y1); return }
-  // Estimate flatness as the distance from control point to chord.
-  const dx = x1 - x0, dy = y1 - y0
-  const denom = dx * dx + dy * dy
-  const d = denom === 0
-    ? Math.hypot(c1x - x0, c1y - y0)
-    : Math.abs((c1x - x1) * dy - (c1y - y1) * dx) / Math.sqrt(denom)
-  if (d <= tolerance) {
-    out.push(x1, y1)
-    return
+  const stack = quadStack
+  const baseSp = stack.length
+  stack.push(x0, y0, c1x, c1y, x1, y1, depth)
+  while (stack.length > baseSp) {
+    const top = stack.length - QUAD_STACK_FRAME
+    const fx0 = stack[top]!, fy0 = stack[top + 1]!
+    const fc1x = stack[top + 2]!, fc1y = stack[top + 3]!
+    const fx1 = stack[top + 4]!, fy1 = stack[top + 5]!
+    const fdepth = stack[top + 6]!
+    stack.length = top
+    if (fdepth >= MAX_FLATTEN_DEPTH) { out.push(fx1, fy1); continue }
+    const dx = fx1 - fx0, dy = fy1 - fy0
+    const denom = dx * dx + dy * dy
+    const d = denom === 0
+      ? Math.hypot(fc1x - fx0, fc1y - fy0)
+      : Math.abs((fc1x - fx1) * dy - (fc1y - fy1) * dx) / Math.sqrt(denom)
+    if (d <= tolerance) {
+      out.push(fx1, fy1)
+      continue
+    }
+    const m12x = (fx0 + fc1x) * 0.5, m12y = (fy0 + fc1y) * 0.5
+    const m23x = (fc1x + fx1) * 0.5, m23y = (fc1y + fy1) * 0.5
+    const mx = (m12x + m23x) * 0.5
+    const my = (m12y + m23y) * 0.5
+    stack.push(mx, my, m23x, m23y, fx1, fy1, fdepth + 1)
+    stack.push(fx0, fy0, m12x, m12y, mx, my, fdepth + 1)
   }
-  const m12x = (x0 + c1x) / 2, m12y = (y0 + c1y) / 2
-  const m23x = (c1x + x1) / 2, m23y = (c1y + y1) / 2
-  const mx = (m12x + m23x) / 2
-  const my = (m12y + m23y) / 2
-  flattenQuadratic(x0, y0, m12x, m12y, mx, my, tolerance, out, depth + 1)
-  flattenQuadratic(mx, my, m23x, m23y, x1, y1, tolerance, out, depth + 1)
 }
 
 /**

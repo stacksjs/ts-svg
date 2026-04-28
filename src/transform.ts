@@ -63,20 +63,83 @@ function skewY(deg: number): Matrix {
   return [1, Math.tan((deg * Math.PI) / 180), 0, 1, 0, 0]
 }
 
-/** Parse `transform="..."` attribute value into a single composed matrix. */
+/**
+ * Parse `transform="..."` attribute value into a single composed matrix.
+ *
+ * Hand-rolled scanner — no regex, no per-call array allocations beyond the
+ * argument list itself. Tokens look like: `name([num1[,] num2 ...])` with
+ * any whitespace allowed.
+ */
 export function parseTransform(s: string): Matrix {
-  const re = /(matrix|translate|scale|rotate|skewX|skewY)\s*\(([^)]*)\)/g
-  let m: RegExpExecArray | null
+  if (s == null || s.length === 0) return IDENTITY
+  const len = s.length
+  let i = 0
   let result: Matrix = IDENTITY
-  while ((m = re.exec(s)) != null) {
-    const fn = m[1]!
-    const args = m[2]!.split(/[\s,]+/).filter(Boolean).map(Number)
+  const args: number[] = []
+
+  while (i < len) {
+    // skip whitespace and commas
+    let c = s.charCodeAt(i)
+    while (c === 32 || c === 9 || c === 10 || c === 13 || c === 44) {
+      i++
+      if (i >= len) return result
+      c = s.charCodeAt(i)
+    }
+    // function name
+    const nameStart = i
+    while (i < len) {
+      const cc = s.charCodeAt(i)
+      // a-z A-Z only
+      if ((cc >= 97 && cc <= 122) || (cc >= 65 && cc <= 90)) i++
+      else break
+    }
+    if (i === nameStart) break
+    const fn = s.slice(nameStart, i)
+    // skip whitespace before '('
+    while (i < len) {
+      const cc = s.charCodeAt(i)
+      if (cc === 32 || cc === 9 || cc === 10 || cc === 13) i++
+      else break
+    }
+    if (s.charCodeAt(i) !== 40 /* ( */) break
+    i++
+    args.length = 0
+    // parse numbers until ')'
+    while (i < len) {
+      let cc = s.charCodeAt(i)
+      while (cc === 32 || cc === 9 || cc === 10 || cc === 13 || cc === 44) {
+        i++
+        if (i >= len) break
+        cc = s.charCodeAt(i)
+      }
+      if (cc === 41 /* ) */) { i++; break }
+      // read a number — allow leading +/-, digits, '.', exponent
+      const numStart = i
+      if (cc === 43 || cc === 45) { i++; cc = s.charCodeAt(i) }
+      let sawDigit = false
+      while (i < len) {
+        const dc = s.charCodeAt(i)
+        if (dc >= 48 && dc <= 57) { sawDigit = true; i++ }
+        else if (dc === 46) { i++ } // '.'
+        else break
+      }
+      if (i < len) {
+        const ec = s.charCodeAt(i)
+        if (ec === 101 || ec === 69) {
+          i++
+          const sc = s.charCodeAt(i)
+          if (sc === 43 || sc === 45) i++
+          while (i < len && s.charCodeAt(i) >= 48 && s.charCodeAt(i) <= 57) i++
+        }
+      }
+      if (!sawDigit) break
+      args.push(Number.parseFloat(s.slice(numStart, i)))
+    }
+
     let next: Matrix
     switch (fn) {
       case 'matrix':
-        next = args.length === 6
-          ? [args[0]!, args[1]!, args[2]!, args[3]!, args[4]!, args[5]!]
-          : IDENTITY
+        next = args.length === 6 ? [args[0]!, args[1]!, args[2]!, args[3]!, args[4]!, args[5]!] : IDENTITY
         break
       case 'translate':
         next = translate(args[0] ?? 0, args[1] ?? 0)
@@ -96,7 +159,7 @@ export function parseTransform(s: string): Matrix {
       default:
         next = IDENTITY
     }
-    result = multiply(result, next)
+    result = result === IDENTITY ? next : multiply(result, next)
   }
   return result
 }

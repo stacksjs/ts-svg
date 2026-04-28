@@ -91,7 +91,7 @@ export const fn: Plugin = (root) => {
                     && pathNode.attributes.id != null
                   ) {
                     detachNodeFromParent(pathNode, defsTag)
-                    const selector = `[xlink\\:href=#${pathNode.attributes.id}], [href=#${pathNode.attributes.id}]`
+                    const selector = `[xlink\\:href="#${pathNode.attributes.id}"], [href="#${pathNode.attributes.id}"]`
                     for (const child of querySelectorAll(node, selector)) {
                       if (child.type !== 'element')
                         continue
