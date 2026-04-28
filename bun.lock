@@ -5,6 +5,7 @@
     "": {
       "name": "bun-ts-starter",
       "dependencies": {
+        "@stacksjs/ts-css": "link:@stacksjs/ts-css",
         "@stacksjs/ts-png": "^0.1.2",
       },
       "devDependencies": {
@@ -35,6 +36,8 @@
     "@stacksjs/ts-cloud-core": ["@stacksjs/ts-cloud-core@0.1.9", "", { "dependencies": { "@stacksjs/ts-cloud-aws-types": "0.1.9", "@stacksjs/ts-cloud-types": "0.1.9" } }, "sha512-9nitzYxEI709S4hUH8HcqkV5bJ/DGo8Dhn4RfPO8P4nvEpjecoP9ZqUxPxkSth7Ig9w4z/C9ArmHAnkSaFNNQw=="],
 
     "@stacksjs/ts-cloud-types": ["@stacksjs/ts-cloud-types@0.1.9", "", {}, "sha512-uBRtR/4CzSf2ZDDQ2vGM0ZSbxnxHaMkh/YLdSlXBhJuy30JMBKsos/CuHgBrL1W0CPETxwd9G+Bt7NQ7et6kkQ=="],
+
+    "@stacksjs/ts-css": ["@stacksjs/ts-css@link:@stacksjs/ts-css", { "bin": { "ts-css": "./dist/bin/cli.js" } }],
 
     "@stacksjs/ts-md": ["@stacksjs/ts-md@0.1.1", "", { "bin": { "md": "./bin/cli.ts" } }, "sha512-kvsSg7S3vHq65fnHIRggTLudN4n1sjkos86xLB62V6PVRa8iosYAmFKVDTGaJk+0MdsIoRwQbJ2vLWVcNQsgGw=="],
 

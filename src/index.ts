@@ -1,5 +1,6 @@
 /**
- * ts-svg — pure-TypeScript SVG parser, rasterizer, and PNG encoder for Bun/Node.
+ * ts-svg — pure-TypeScript SVG parser, rasterizer, PNG encoder, and optimizer
+ * for Bun/Node.
  *
  * Public surface:
  *   - `parseSVG(svg)` — string → typed element tree
@@ -7,6 +8,8 @@
  *   - `encodePng(fb)` — framebuffer → PNG bytes
  *   - `svgToPng(svg, opts)` — convenience pipeline
  *   - `Resvg` — `@resvg/resvg-js`-compatible class shim
+ *   - `optimize(svg, config?)` — SVGO-compatible optimization pipeline
+ *   - re-exports under `optimize/*` for direct AST work
  */
 
 export * from './config'
@@ -60,3 +63,17 @@ export function svgToPng(svg: string, opts?: RenderOptions): Buffer {
   const fb = rasterize(root, opts)
   return encodePng(fb)
 }
+
+// ----- optimizer subsystem -----
+export { builtinPlugins, optimize, parseSvg, stringifySvg, SvgParserError } from './optimize'
+export type {
+  Config as OptimizeConfig,
+  Output as OptimizeOutput,
+  Plugin as OptimizePlugin,
+  PluginConfig as OptimizePluginConfig,
+  XastChild,
+  XastElement,
+  XastNode,
+  XastParent,
+  XastRoot,
+} from './optimize'
