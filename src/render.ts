@@ -276,14 +276,29 @@ function polygonToPolys(p: SVGPolygon): number[][] {
   return [flat]
 }
 
+// Per-shape cache — keyed by the path node identity. Each <path> only renders
+// once per renderNode call, but the fill+stroke split would otherwise parse
+// and flatten the path's `d` attribute twice. The cache is keyed weakly so
+// nodes don't keep their parsed flattenings alive after rendering.
+const pathFlattenCache = new WeakMap<SVGPath, { tolerance: number, contours: Array<{ points: number[], closed: boolean }> }>()
+
+function flattenPath(p: SVGPath, tolerance: number): Array<{ points: number[], closed: boolean }> {
+  const cached = pathFlattenCache.get(p)
+  if (cached && cached.tolerance === tolerance) return cached.contours
+  const contours = flattenCommands(parsePath(p.d), tolerance)
+  pathFlattenCache.set(p, { tolerance, contours })
+  return contours
+}
+
 function pathToPolys(p: SVGPath, tolerance: number): number[][] {
-  const cmds = parsePath(p.d)
-  return flattenCommands(cmds, tolerance).map(c => c.points)
+  const contours = flattenPath(p, tolerance)
+  const out = new Array<number[]>(contours.length)
+  for (let i = 0; i < contours.length; i++) out[i] = contours[i]!.points
+  return out
 }
 
 function pathToPolylines(p: SVGPath, tolerance: number): Array<{ points: number[], closed: boolean }> {
-  const cmds = parsePath(p.d)
-  return flattenCommands(cmds, tolerance)
+  return flattenPath(p, tolerance)
 }
 
 function textToPolys(node: SVGText, tolerance: number, resolver: FontResolver | undefined): number[][] {
@@ -517,7 +532,8 @@ function renderNode(node: SVGNode, parentStyle: InheritedStyle, ctx: RenderCtx):
       renderLayer(node, nodeStyle, ctx, clipId, maskId, ownOpacity ? node.opacity! : 1)
       return
     }
-    for (const c of node.children) renderNode(c, nodeStyle, ctx)
+    const children = node.children
+    for (let i = 0; i < children.length; i++) renderNode(children[i]!, nodeStyle, ctx)
     return
   }
 
@@ -734,11 +750,20 @@ function drawShape(node: SVGNode, style: InheritedStyle, ctx: RenderCtx): void {
     }
   }
 
-  // SVG 2 paint-order: walk the cascaded list. `markers` is a no-op for now.
-  for (const phase of style.paintOrder) {
-    if (phase === 'fill') doFill()
-    else if (phase === 'stroke') doStroke()
-    // 'markers' — not implemented (no <marker> element support yet).
+  // SVG 2 paint-order: walk the cascaded list. Common case is the default
+  // ['fill', 'stroke', 'markers'] tuple — fast-path that without invoking
+  // an iterator. `markers` is a no-op (no <marker> support yet).
+  const order = style.paintOrder
+  if (order[0] === 'fill' && order[1] === 'stroke') {
+    doFill()
+    doStroke()
+  }
+  else {
+    for (let i = 0; i < order.length; i++) {
+      const phase = order[i]
+      if (phase === 'fill') doFill()
+      else if (phase === 'stroke') doStroke()
+    }
   }
 }
 
@@ -749,8 +774,9 @@ function drawShape(node: SVGNode, style: InheritedStyle, ctx: RenderCtx): void {
 function nodeUserBBox(node: SVGNode, tolerance: number, resolver: FontResolver | undefined): { x: number, y: number, width: number, height: number } {
   if (node.tag === 'svg' || node.tag === 'g') {
     let xMin = Infinity, yMin = Infinity, xMax = -Infinity, yMax = -Infinity
-    for (const c of node.children) {
-      const b = nodeUserBBox(c, tolerance, resolver)
+    const children = node.children
+    for (let i = 0; i < children.length; i++) {
+      const b = nodeUserBBox(children[i]!, tolerance, resolver)
       if (b.width === 0 && b.height === 0) continue
       if (b.x < xMin) xMin = b.x
       if (b.y < yMin) yMin = b.y
@@ -781,7 +807,8 @@ function renderLayer(node: SVGNode, style: InheritedStyle, ctx: RenderCtx, clipI
   const innerStyle: InheritedStyle = { ...style, clipPath: undefined, mask: undefined, opacity: 1 }
 
   if (node.tag === 'svg' || node.tag === 'g') {
-    for (const c of node.children) renderNode(c, innerStyle, layerCtx)
+    const children = node.children
+    for (let i = 0; i < children.length; i++) renderNode(children[i]!, innerStyle, layerCtx)
   }
   else {
     drawShape(node, innerStyle, layerCtx)
@@ -851,9 +878,14 @@ function renderLayer(node: SVGNode, style: InheritedStyle, ctx: RenderCtx, clipI
 
   // Apply layer-level opacity (group `opacity` per spec) by scaling alpha.
   if (layerOpacity < 1) {
-    const k = Math.max(0, Math.min(1, layerOpacity))
-    for (let i = 3; i < offscreen.data.length; i += 4) {
-      offscreen.data[i] = Math.round(offscreen.data[i]! * k)
+    let k = layerOpacity
+    if (k < 0) k = 0
+    if (k > 1) k = 1
+    const od = offscreen.data
+    const len = od.length
+    for (let i = 3; i < len; i += 4) {
+      const a = od[i]!
+      if (a !== 0) od[i] = (a * k + 0.5) | 0
     }
   }
 

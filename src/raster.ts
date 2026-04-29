@@ -93,6 +93,15 @@ function blendPixel(fb: Framebuffer, x: number, y: number, color: RGBA, coverage
  * `paint` may be a solid `RGBA` colour or a `{ sample(x, y): RGBA }` source
  * (e.g. a gradient evaluated per pixel).
  */
+// Module-level scratch buffers reused across fillPolygons calls. The
+// rasterizer is hot — every shape allocates these on the order of
+// (fbH * 4 entries) + (fbW float32s), which adds up to MB of garbage on
+// big SVGs. Reusing them keeps the GC quiet.
+let scratchBuckets: Array<number[] | undefined> = []
+let scratchRowSeen: Uint8Array = new Uint8Array(0)
+let scratchCov: Float32Array = new Float32Array(0)
+let scratchDirtyRows: number[] = []
+
 export function fillPolygons(
   fb: Framebuffer,
   polys: number[][],
@@ -109,12 +118,27 @@ export function fillPolygons(
   const fbH = fb.height
   const isEvenOdd = fillRule === 'evenodd'
 
-  // Per-row buckets indexed [row * SAMPLES + sampleIdx]. Each bucket is a
-  // flat number array: [x0, w0, x1, w1, ...]. Allocated lazily.
-  const buckets: Array<number[] | undefined> = new Array(fbH * SAMPLES)
-  // Track which rows actually had work — saves scanning empty rows of large fbs.
-  const dirtyRows: number[] = []
-  const rowSeen = new Uint8Array(fbH)
+  // Reuse module-level scratch buffers. We grow them on demand and reuse
+  // them — `buckets` and `dirtyRows` are reset via the dirty-row list at
+  // the end of the function so we never have to scan the full bucket array.
+  const need = fbH * SAMPLES
+  let buckets = scratchBuckets
+  if (buckets.length < need) {
+    buckets = new Array(need)
+    scratchBuckets = buckets
+  }
+  let rowSeen = scratchRowSeen
+  if (rowSeen.length < fbH) {
+    rowSeen = new Uint8Array(fbH)
+    scratchRowSeen = rowSeen
+  }
+  let cov = scratchCov
+  if (cov.length < fbW) {
+    cov = new Float32Array(fbW)
+    scratchCov = cov
+  }
+  const dirtyRows = scratchDirtyRows
+  dirtyRows.length = 0
 
   // Build edges directly into per-sample-line buckets.
   for (let pi = 0; pi < polys.length; pi++) {
@@ -160,9 +184,7 @@ export function fillPolygons(
     }
   }
 
-  // Reusable per-row coverage buffer. Only the leftmost..rightmost touched
-  // pixel range needs to be scanned/cleared each row.
-  const cov = new Float32Array(fbW)
+  // (cov / buckets / rowSeen / dirtyRows are pooled at module scope above.)
 
   for (let r = 0; r < dirtyRows.length; r++) {
     const row = dirtyRows[r]!
@@ -226,14 +248,63 @@ export function fillPolygons(
     if (maxPx >= 0) {
       if (maxPx >= fbW) maxPx = fbW - 1
       const sampleFn = solid ? null : (paint as { sample: (x: number, y: number) => RGBA }).sample
+      const fbData = fb.data
+      const rowBase = row * fbW * 4
+      // Lift the solid-paint components out of the loop — common case.
+      const sR = solid ? solid.r : 0
+      const sG = solid ? solid.g : 0
+      const sB = solid ? solid.b : 0
+      const sA = solid ? solid.a : 0
+
       for (let px = minPx; px <= maxPx; px++) {
         const c = cov[px]!
-        if (c > 0) {
-          const color = solid ?? sampleFn!(px + 0.5, row + 0.5)
-          blendPixel(fb, px, row, color, c < 1 ? c : 1)
-          cov[px] = 0
+        if (c <= 0) continue
+        cov[px] = 0
+        const coverage = c < 1 ? c : 1
+        const idx = rowBase + px * 4
+
+        // Inline blendPixel — saves a function call per filled pixel and
+        // skips the bounds check (we've already clamped to [0, fbW-1] and
+        // row is in-range by construction).
+        let cr: number, cg: number, cb: number, ca: number
+        if (solid) {
+          cr = sR; cg = sG; cb = sB; ca = sA
         }
+        else {
+          const color = sampleFn!(px + 0.5, row + 0.5)
+          cr = color.r; cg = color.g; cb = color.b; ca = color.a
+        }
+        if (ca === 0) continue
+        if (ca === 255 && coverage >= 1) {
+          fbData[idx] = cr; fbData[idx + 1] = cg; fbData[idx + 2] = cb; fbData[idx + 3] = 255
+          continue
+        }
+        const srcA255 = (ca * coverage) | 0
+        if (srcA255 === 0) continue
+        const dstA = fbData[idx + 3]!
+        if (dstA === 0) {
+          fbData[idx] = cr; fbData[idx + 1] = cg; fbData[idx + 2] = cb; fbData[idx + 3] = srcA255
+          continue
+        }
+        const srcA = srcA255 / 255
+        const dstAf = dstA / 255
+        const oneMinus = 1 - srcA
+        const outA = srcA + dstAf * oneMinus
+        if (outA === 0) continue
+        const inv = 1 / outA
+        fbData[idx]     = ((cr * srcA + fbData[idx]!     * dstAf * oneMinus) * inv + 0.5) | 0
+        fbData[idx + 1] = ((cg * srcA + fbData[idx + 1]! * dstAf * oneMinus) * inv + 0.5) | 0
+        fbData[idx + 2] = ((cb * srcA + fbData[idx + 2]! * dstAf * oneMinus) * inv + 0.5) | 0
+        fbData[idx + 3] = ((outA * 255) + 0.5) | 0
       }
+    }
+    // Reset per-row state so this row is clean for the next fillPolygons call.
+    // Keep the bucket arrays themselves around (length-truncated) — that way
+    // subsequent calls hit the array reuse path and skip the alloc.
+    rowSeen[row] = 0
+    for (let s = 0; s < SAMPLES; s++) {
+      const list = buckets[row * SAMPLES + s]
+      if (list !== undefined && list.length !== 0) list.length = 0
     }
   }
 }
@@ -262,14 +333,23 @@ export const DEFAULT_STROKE: StrokeStyle = {
   dashOffset: 0,
 }
 
-/** Add an N-segment circular fan around (cx, cy) covering arcs from angle a0 to a1. */
+/** Add an N-segment circular fan around (cx, cy) covering arcs from angle a0 to a1.
+ *
+ * Uses a two-multiplication rotation recurrence: cosine and sine for the
+ * step angle are computed once, then each successive (cos, sin) pair is
+ * derived via the rotation identity. Replaces 2N transcendental calls
+ * with two upfront. */
 function appendArc(out: number[], cx: number, cy: number, r: number, a0: number, a1: number, segments: number): void {
-  // CCW direction is determined by the caller's caller; we honour the sign of a1-a0.
-  const da = a1 - a0
+  const step = (a1 - a0) / segments
+  const cs = Math.cos(step)
+  const sn = Math.sin(step)
+  let cosA = Math.cos(a0)
+  let sinA = Math.sin(a0)
   for (let i = 1; i <= segments; i++) {
-    const t = i / segments
-    const a = a0 + da * t
-    out.push(cx + Math.cos(a) * r, cy + Math.sin(a) * r)
+    const newCos = cosA * cs - sinA * sn
+    sinA = sinA * cs + cosA * sn
+    cosA = newCos
+    out.push(cx + cosA * r, cy + sinA * r)
   }
 }
 
@@ -284,13 +364,18 @@ function appendArc(out: number[], cx: number, cy: number, r: number, a0: number,
  * Returns one or more closed polygons that, filled, produce the stroke.
  */
 function signedArea(poly: number[]): number {
+  const n = poly.length
+  if (n < 6) return 0
   let a = 0
-  const n = poly.length / 2
-  for (let i = 0; i < n; i++) {
-    const j = (i + 1) % n
-    a += poly[i * 2]! * poly[j * 2 + 1]! - poly[j * 2]! * poly[i * 2 + 1]!
+  // Walk pairs (i, i+1) up to the second-to-last vertex; the wraparound
+  // contribution from last→first is added explicitly to avoid `% n` in
+  // the hot loop.
+  for (let i = 0; i < n - 2; i += 2) {
+    a += poly[i]! * poly[i + 3]! - poly[i + 2]! * poly[i + 1]!
   }
-  return a / 2
+  // Last edge: (n-2, n-1) → (0, 1)
+  a += poly[n - 2]! * poly[1]! - poly[0]! * poly[n - 1]!
+  return a * 0.5
 }
 
 function strokeOutline(poly: number[], st: StrokeStyle, closed: boolean): number[][] {

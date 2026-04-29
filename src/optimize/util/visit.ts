@@ -41,9 +41,20 @@ export function visit(node: XastNode, visitor: Visitor, parentNode?: XastParent 
   if (descend) {
     // Snapshot via index loop — callbacks may splice the array.
     const children = node.children
-    const snapshot = children.length > 1 ? children.slice() : children
-    for (let i = 0; i < snapshot.length; i++)
-      visit(snapshot[i]!, visitor, node as XastParent)
+    const len = children.length
+    if (len === 0) {
+      // nothing to do
+    }
+    else if (len === 1) {
+      visit(children[0]!, visitor, node as XastParent)
+    }
+    else {
+      // Manual `new Array(n) + index copy` is a hair faster than .slice() in
+      // V8/Bun because slice goes through the generic Array prototype path.
+      const snapshot = new Array<XastNode>(len)
+      for (let k = 0; k < len; k++) snapshot[k] = children[k]!
+      for (let i = 0; i < len; i++) visit(snapshot[i]!, visitor, node as XastParent)
+    }
   }
 
   // Exit always runs (matches svgo semantics — even detached nodes get an

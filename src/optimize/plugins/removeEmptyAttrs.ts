@@ -9,9 +9,10 @@ export const description = 'removes empty attributes'
 export const fn: Plugin = () => ({
   element: {
     enter: (node) => {
-      for (const [n, v] of Object.entries(node.attributes)) {
-        if (v === '' && !attrsGroups.conditionalProcessing!.has(n))
-          delete node.attributes[n]
+      const attrs = node.attributes
+      for (const n in attrs) {
+        if (attrs[n] === '' && !attrsGroups.conditionalProcessing!.has(n))
+          delete attrs[n]
       }
     },
   },

@@ -91,7 +91,9 @@ export const fn: Plugin<CleanupIdsParams> = (_root, params) => {
           }
         }
 
-        for (const [n, value] of Object.entries(node.attributes)) {
+        const attrs = node.attributes
+        for (const n in attrs) {
+          const value = attrs[n]!
           if (n === 'id') {
             const id = value
             if (nodeById.has(id))

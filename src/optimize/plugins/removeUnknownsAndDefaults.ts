@@ -121,7 +121,9 @@ export const fn: Plugin<RemoveUnknownsAndDefaultsParams> = (root, params) => {
           ? computeStyle(stylesheet, parentNode)
           : null
 
-        for (const [n, value] of Object.entries(node.attributes)) {
+        const attrs = node.attributes
+        for (const n in attrs) {
+          const value = attrs[n]!
           if (keepDataAttrs && n.startsWith('data-'))
             continue
           if (keepAriaAttrs && n.startsWith('aria-'))

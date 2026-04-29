@@ -176,39 +176,43 @@ export function parsePathData(string: string): PathDataItem[] {
   return pathData
 }
 
-function roundAndStringify(num: number, precision?: number): { roundedStr: string, rounded: number } {
-  if (precision != null)
-    num = toFixed(num, precision)
-  return { roundedStr: removeLeadingZero(num), rounded: num }
-}
-
 function stringifyArgs(
   command: string,
   args: ReadonlyArray<number>,
   precision: number | undefined,
   disableSpaceAfterFlags: boolean | undefined,
 ): string {
+  // Inline `roundAndStringify` to avoid allocating a 2-field object per
+  // path argument. Hot path: stringifying a path with thousands of segs.
+  const isArc = (command === 'A' || command === 'a')
+  const noSpaceAfterFlags = !!disableSpaceAfterFlags && isArc
   let result = ''
   let previous: number | undefined
-  for (let i = 0; i < args.length; i++) {
-    const { roundedStr, rounded } = roundAndStringify(args[i]!, precision)
-    if (
-      disableSpaceAfterFlags
-      && (command === 'A' || command === 'a')
-      && (i % 7 === 4 || i % 7 === 5)
-    ) {
+  const len = args.length
+  for (let i = 0; i < len; i++) {
+    let num = args[i]!
+    if (precision != null) num = toFixed(num, precision)
+    const roundedStr = removeLeadingZero(num)
+    if (noSpaceAfterFlags) {
+      const pos = i % 7
+      if (pos === 4 || pos === 5) { result += roundedStr; previous = num; continue }
+    }
+    if (i === 0 || num < 0) {
       result += roundedStr
     }
-    else if (i === 0 || rounded < 0) {
-      result += roundedStr
-    }
-    else if (previous !== undefined && !Number.isInteger(previous) && !isDigit(roundedStr[0]!)) {
-      result += roundedStr
+    else if (previous !== undefined && !Number.isInteger(previous)) {
+      // The previous arg ended in a decimal (its `.x` runs to the end), so
+      // we can elide the separator iff the new arg doesn't begin with a
+      // digit (i.e. starts with a sign or `.`). `roundedStr.charCodeAt(0)`
+      // is the first byte; check whether it's a digit (48–57).
+      const c = roundedStr.charCodeAt(0)
+      if (c < 48 || c > 57) result += roundedStr
+      else result += ` ${roundedStr}`
     }
     else {
       result += ` ${roundedStr}`
     }
-    previous = rounded
+    previous = num
   }
   return result
 }

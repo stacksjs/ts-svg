@@ -43,9 +43,10 @@ export const fn: Plugin<ConvertColorsParams> = (_root, params) => {
       enter: (node) => {
         if (node.name === 'mask')
           maskCounter++
-        for (const [n, value] of Object.entries(node.attributes)) {
+        const attrs = node.attributes
+        for (const n in attrs) {
           if (colorsProps.has(n)) {
-            let val = value
+            let val = attrs[n]!
             if (currentColor && maskCounter === 0) {
               let matched: boolean
               if (typeof currentColor === 'string')

@@ -45,9 +45,11 @@ export const fn: Plugin<CleanupNumericValuesParams> = (_root, params) => {
             .join(' ')
         }
 
-        for (const [n, value] of Object.entries(node.attributes)) {
+        const attrs = node.attributes
+        for (const n in attrs) {
           if (n === 'version')
             continue
+          const value = attrs[n]!
           const match = regNumericValues.exec(value)
           if (match) {
             let num = Number(Number(match[1]).toFixed(floatPrecision))

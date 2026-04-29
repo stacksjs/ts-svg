@@ -18,11 +18,27 @@ export function invokePlugins(
   overrides: Overrides,
   globalOverrides: Record<string, any>,
 ): void {
-  for (const plugin of plugins) {
-    const override = overrides?.[plugin.name]
-    if (override === false)
-      continue
-    const params = { ...plugin.params, ...globalOverrides, ...override }
+  // Pre-compute whether either of the per-plugin merge sources is empty so we
+  // can skip the spread on the common case (no per-plugin overrides + no
+  // global overrides). This kills one Object.assign-style alloc per plugin.
+  const noOverrides = overrides == null
+  let noGlobal = true
+  for (const _ in globalOverrides) { noGlobal = false; break }
+  const len = plugins.length
+  for (let i = 0; i < len; i++) {
+    const plugin = plugins[i]!
+    const override = noOverrides ? undefined : overrides![plugin.name]
+    if (override === false) continue
+    let params: any
+    if (noOverrides && noGlobal) {
+      params = plugin.params ?? {}
+    }
+    else if (override === undefined) {
+      params = noGlobal ? (plugin.params ?? {}) : { ...plugin.params, ...globalOverrides }
+    }
+    else {
+      params = { ...plugin.params, ...globalOverrides, ...override }
+    }
     const visitor = plugin.fn(ast, params, info)
     if (visitor != null)
       visit(ast, visitor)
