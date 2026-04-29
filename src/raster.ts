@@ -27,8 +27,25 @@ function isSolid(p: Paint): p is RGBA {
 
 export function createFramebuffer(width: number, height: number, bg: RGBA): Framebuffer {
   const data = new Uint8Array(width * height * 4)
-  for (let i = 0; i < data.length; i += 4) {
-    data[i] = bg.r; data[i + 1] = bg.g; data[i + 2] = bg.b; data[i + 3] = bg.a
+  // Default background is transparent (a=0); Uint8Array is zero-filled, so
+  // we can skip the per-pixel write entirely. This matters because every
+  // rasterize() call creates a fresh framebuffer.
+  if (bg.a === 0 && bg.r === 0 && bg.g === 0 && bg.b === 0) {
+    return { width, height, data }
+  }
+  // Solid colour: pack RGBA into a single 32-bit word and use Uint32Array
+  // to fill 4 bytes per write instead of 4 separate stores per pixel.
+  if (data.byteLength % 4 === 0) {
+    const u32 = new Uint32Array(data.buffer, data.byteOffset, data.byteLength >>> 2)
+    // Endianness-aware pack: write a probe pixel through Uint8Array, read
+    // back through Uint32Array, and use the resulting word as the fill key.
+    data[0] = bg.r; data[1] = bg.g; data[2] = bg.b; data[3] = bg.a
+    u32.fill(u32[0]!)
+  }
+  else {
+    for (let i = 0; i < data.length; i += 4) {
+      data[i] = bg.r; data[i + 1] = bg.g; data[i + 2] = bg.b; data[i + 3] = bg.a
+    }
   }
   return { width, height, data }
 }
@@ -50,35 +67,35 @@ function blendPixel(fb: Framebuffer, x: number, y: number, color: RGBA, coverage
   const idx = (y * fb.width + x) * 4
   const srcAlpha = color.a
   if (srcAlpha === 255 && coverage >= 1) {
-    // Fully opaque source covering full pixel — straight write.
     data[idx] = color.r
     data[idx + 1] = color.g
     data[idx + 2] = color.b
     data[idx + 3] = 255
     return
   }
-  // 0..255 source coverage value.
   const srcA255 = (srcAlpha * coverage) | 0
   if (srcA255 === 0) return
   const dstA = data[idx + 3]!
   if (dstA === 0) {
-    // Empty destination — straight write w/ coverage as alpha (no blend).
     data[idx] = color.r
     data[idx + 1] = color.g
     data[idx + 2] = color.b
     data[idx + 3] = srcA255
     return
   }
-  // General source-over.
+  // General source-over. Factor srcA/outA and dstAf*(1-srcA)/outA out of
+  // each channel — saves two multiplies per channel (six total per pixel).
   const srcA = srcA255 / 255
   const dstAf = dstA / 255
   const oneMinus = 1 - srcA
   const outA = srcA + dstAf * oneMinus
   if (outA === 0) return
   const inv = 1 / outA
-  data[idx]     = ((color.r * srcA + data[idx]!     * dstAf * oneMinus) * inv + 0.5) | 0
-  data[idx + 1] = ((color.g * srcA + data[idx + 1]! * dstAf * oneMinus) * inv + 0.5) | 0
-  data[idx + 2] = ((color.b * srcA + data[idx + 2]! * dstAf * oneMinus) * inv + 0.5) | 0
+  const sw = srcA * inv
+  const dw = dstAf * oneMinus * inv
+  data[idx]     = (color.r * sw + data[idx]!     * dw + 0.5) | 0
+  data[idx + 1] = (color.g * sw + data[idx + 1]! * dw + 0.5) | 0
+  data[idx + 2] = (color.b * sw + data[idx + 2]! * dw + 0.5) | 0
   data[idx + 3] = ((outA * 255) + 0.5) | 0
 }
 
@@ -247,55 +264,90 @@ export function fillPolygons(
 
     if (maxPx >= 0) {
       if (maxPx >= fbW) maxPx = fbW - 1
-      const sampleFn = solid ? null : (paint as { sample: (x: number, y: number) => RGBA }).sample
       const fbData = fb.data
       const rowBase = row * fbW * 4
-      // Lift the solid-paint components out of the loop — common case.
-      const sR = solid ? solid.r : 0
-      const sG = solid ? solid.g : 0
-      const sB = solid ? solid.b : 0
-      const sA = solid ? solid.a : 0
 
-      for (let px = minPx; px <= maxPx; px++) {
-        const c = cov[px]!
-        if (c <= 0) continue
-        cov[px] = 0
-        const coverage = c < 1 ? c : 1
-        const idx = rowBase + px * 4
-
-        // Inline blendPixel — saves a function call per filled pixel and
-        // skips the bounds check (we've already clamped to [0, fbW-1] and
-        // row is in-range by construction).
-        let cr: number, cg: number, cb: number, ca: number
-        if (solid) {
-          cr = sR; cg = sG; cb = sB; ca = sA
+      // Specialise the inner loop on whether the paint is a solid fully-opaque
+      // RGBA. The opaque-solid case is overwhelmingly common (icons, UI shapes)
+      // and lets us hoist alpha tests + four hot constants out of the loop.
+      if (solid && solid.a === 255) {
+        const sR = solid.r, sG = solid.g, sB = solid.b
+        for (let px = minPx; px <= maxPx; px++) {
+          const c = cov[px]!
+          if (c <= 0) continue
+          cov[px] = 0
+          const idx = rowBase + px * 4
+          if (c >= 1) {
+            // Full coverage — overwrite.
+            fbData[idx] = sR; fbData[idx + 1] = sG; fbData[idx + 2] = sB; fbData[idx + 3] = 255
+            continue
+          }
+          // Partial coverage — coverage IS the source alpha (255 * c).
+          const srcA255 = (255 * c) | 0
+          if (srcA255 === 0) continue
+          const dstA = fbData[idx + 3]!
+          if (dstA === 0) {
+            fbData[idx] = sR; fbData[idx + 1] = sG; fbData[idx + 2] = sB; fbData[idx + 3] = srcA255
+            continue
+          }
+          const srcA = srcA255 / 255
+          const dstAf = dstA / 255
+          const oneMinus = 1 - srcA
+          const outA = srcA + dstAf * oneMinus
+          const inv = 1 / outA
+          const sw = srcA * inv
+          const dw = dstAf * oneMinus * inv
+          fbData[idx]     = (sR * sw + fbData[idx]!     * dw + 0.5) | 0
+          fbData[idx + 1] = (sG * sw + fbData[idx + 1]! * dw + 0.5) | 0
+          fbData[idx + 2] = (sB * sw + fbData[idx + 2]! * dw + 0.5) | 0
+          fbData[idx + 3] = ((outA * 255) + 0.5) | 0
         }
-        else {
-          const color = sampleFn!(px + 0.5, row + 0.5)
-          cr = color.r; cg = color.g; cb = color.b; ca = color.a
+      }
+      else {
+        const sampleFn = solid ? null : (paint as { sample: (x: number, y: number) => RGBA }).sample
+        const sR = solid ? solid.r : 0
+        const sG = solid ? solid.g : 0
+        const sB = solid ? solid.b : 0
+        const sA = solid ? solid.a : 0
+        for (let px = minPx; px <= maxPx; px++) {
+          const c = cov[px]!
+          if (c <= 0) continue
+          cov[px] = 0
+          const coverage = c < 1 ? c : 1
+          const idx = rowBase + px * 4
+          let cr: number, cg: number, cb: number, ca: number
+          if (solid) {
+            cr = sR; cg = sG; cb = sB; ca = sA
+          }
+          else {
+            const color = sampleFn!(px + 0.5, row + 0.5)
+            cr = color.r; cg = color.g; cb = color.b; ca = color.a
+          }
+          if (ca === 0) continue
+          if (ca === 255 && coverage >= 1) {
+            fbData[idx] = cr; fbData[idx + 1] = cg; fbData[idx + 2] = cb; fbData[idx + 3] = 255
+            continue
+          }
+          const srcA255 = (ca * coverage) | 0
+          if (srcA255 === 0) continue
+          const dstA = fbData[idx + 3]!
+          if (dstA === 0) {
+            fbData[idx] = cr; fbData[idx + 1] = cg; fbData[idx + 2] = cb; fbData[idx + 3] = srcA255
+            continue
+          }
+          const srcA = srcA255 / 255
+          const dstAf = dstA / 255
+          const oneMinus = 1 - srcA
+          const outA = srcA + dstAf * oneMinus
+          if (outA === 0) continue
+          const inv = 1 / outA
+          const sw = srcA * inv
+          const dw = dstAf * oneMinus * inv
+          fbData[idx]     = (cr * sw + fbData[idx]!     * dw + 0.5) | 0
+          fbData[idx + 1] = (cg * sw + fbData[idx + 1]! * dw + 0.5) | 0
+          fbData[idx + 2] = (cb * sw + fbData[idx + 2]! * dw + 0.5) | 0
+          fbData[idx + 3] = ((outA * 255) + 0.5) | 0
         }
-        if (ca === 0) continue
-        if (ca === 255 && coverage >= 1) {
-          fbData[idx] = cr; fbData[idx + 1] = cg; fbData[idx + 2] = cb; fbData[idx + 3] = 255
-          continue
-        }
-        const srcA255 = (ca * coverage) | 0
-        if (srcA255 === 0) continue
-        const dstA = fbData[idx + 3]!
-        if (dstA === 0) {
-          fbData[idx] = cr; fbData[idx + 1] = cg; fbData[idx + 2] = cb; fbData[idx + 3] = srcA255
-          continue
-        }
-        const srcA = srcA255 / 255
-        const dstAf = dstA / 255
-        const oneMinus = 1 - srcA
-        const outA = srcA + dstAf * oneMinus
-        if (outA === 0) continue
-        const inv = 1 / outA
-        fbData[idx]     = ((cr * srcA + fbData[idx]!     * dstAf * oneMinus) * inv + 0.5) | 0
-        fbData[idx + 1] = ((cg * srcA + fbData[idx + 1]! * dstAf * oneMinus) * inv + 0.5) | 0
-        fbData[idx + 2] = ((cb * srcA + fbData[idx + 2]! * dstAf * oneMinus) * inv + 0.5) | 0
-        fbData[idx + 3] = ((outA * 255) + 0.5) | 0
       }
     }
     // Reset per-row state so this row is clean for the next fillPolygons call.

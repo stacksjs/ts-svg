@@ -20,10 +20,11 @@ export const fn: Plugin<RemoveEditorsNSDataParams> = (_root, params) => {
     element: {
       enter: (node, parentNode) => {
         if (node.name === 'svg') {
-          for (const [n, v] of Object.entries(node.attributes)) {
-            if (n.startsWith('xmlns:') && namespaces.includes(v)) {
+          const attrs = node.attributes
+          for (const n in attrs) {
+            if (n.startsWith('xmlns:') && namespaces.includes(attrs[n]!)) {
               prefixes.push(n.slice('xmlns:'.length))
-              delete node.attributes[n]
+              delete attrs[n]
             }
           }
         }

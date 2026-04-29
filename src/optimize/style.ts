@@ -94,9 +94,11 @@ function computeOwnStyle(stylesheet: Stylesheet, node: XastElement, parents?: Ma
   const computedStyle: ComputedStyles = {}
   const importantStyles = new Map<string, boolean>()
 
-  for (const [name, value] of Object.entries(node.attributes)) {
-    if (attrsGroups.presentation!.has(name)) {
-      computedStyle[name] = { type: 'static', inherited: false, value }
+  const attrs = node.attributes
+  const presentationGroup = attrsGroups.presentation!
+  for (const name in attrs) {
+    if (presentationGroup.has(name)) {
+      computedStyle[name] = { type: 'static', inherited: false, value: attrs[name]! }
       importantStyles.set(name, false)
     }
   }
@@ -186,13 +188,13 @@ export function computeStyle(stylesheet: Stylesheet, node: XastElement): Compute
   let parent: XastParent | undefined = parents.get(node)
   while (parent != null && parent.type !== 'root') {
     const inheritedStyles = computeOwnStyle(stylesheet, parent, parents as any)
-    for (const [name, computed] of Object.entries(inheritedStyles)) {
+    for (const name in inheritedStyles) {
       if (
         computedStyles[name] == null
         && inheritableAttrs.has(name)
         && !presentationNonInheritableGroupAttrs.has(name)
       ) {
-        computedStyles[name] = { ...computed, inherited: true }
+        computedStyles[name] = { ...inheritedStyles[name]!, inherited: true }
       }
     }
     parent = parents.get(parent)

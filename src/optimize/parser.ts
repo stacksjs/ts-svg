@@ -135,14 +135,27 @@ export function parseSvg(data: string, from?: string): XastRoot {
   while (i < len) {
     const ch = data.charCodeAt(i)
     if (ch !== 60 /* < */) {
-      // text node — read until next `<`
+      // Text node — read until next `<`. Track whether we ever see a non-WS
+      // char inline so non-textual elements that wrap purely-whitespace text
+      // (the common indentation case) skip both decode + trim allocation.
       const start = i
-      while (i < len && data.charCodeAt(i) !== 60)
+      let allWs = ch === 32 || ch === 9 || ch === 10 || ch === 13
+      i++
+      while (i < len) {
+        const cc = data.charCodeAt(i)
+        if (cc === 60) break
+        if (allWs && cc !== 32 && cc !== 9 && cc !== 10 && cc !== 13) allWs = false
         i++
-      const raw = data.slice(start, i)
+      }
       if (current.type === 'element') {
+        const isText = textElems.has(current.name)
+        if (allWs && !isText) {
+          // Whitespace-only and the parent isn't a textual element — drop.
+          continue
+        }
+        const raw = data.slice(start, i)
         const decoded = decodeEntities(raw, hasCustomEntities ? customEntities : null)
-        if (textElems.has(current.name)) {
+        if (isText) {
           const node: XastText = { type: 'text', value: decoded }
           push(node)
         }
@@ -154,8 +167,6 @@ export function parseSvg(data: string, from?: string): XastRoot {
           }
         }
       }
-      // text at root level is silently dropped (matches SAX behaviour for
-      // pre-root whitespace; meaningful root-level text is malformed XML anyway).
       continue
     }
 

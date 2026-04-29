@@ -40,7 +40,9 @@ export const fn: Plugin<RemoveAttrsParams> = (_root, params) => {
           })
 
           if (list[0]!.test(node.name)) {
-            for (const [n, v] of Object.entries(node.attributes)) {
+            const attrs = node.attributes
+            for (const n in attrs) {
+              const v = attrs[n]!
               const isCurrentColor = v.toLowerCase() === 'currentcolor'
               const isFillCurrentColor = preserveCurrentColor && n === 'fill' && isCurrentColor
               const isStrokeCurrentColor = preserveCurrentColor && n === 'stroke' && isCurrentColor

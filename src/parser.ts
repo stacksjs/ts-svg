@@ -383,6 +383,56 @@ function parseLengthPercent(v: string | undefined, base: number, fallback = 0): 
   return n
 }
 
+/**
+ * Parse a `viewBox` attribute value into `{x, y, width, height}` (or
+ * `undefined` if malformed). Char-code single-pass scanner — replaces
+ * `value.split(/[\s,]+/).filter(Boolean).map(Number)`.
+ */
+function parseViewBox(v: string): { x: number, y: number, width: number, height: number } | undefined {
+  const len = v.length
+  let i = 0
+  const nums: number[] = []
+  while (i < len && nums.length < 5) {
+    let c = v.charCodeAt(i)
+    while (c === 32 || c === 9 || c === 10 || c === 13 || c === 44) {
+      i++
+      if (i >= len) break
+      c = v.charCodeAt(i)
+    }
+    if (i >= len) break
+    const start = i
+    if (c === 43 || c === 45) i++
+    let sawDigit = false
+    let sawDot = false
+    while (i < len) {
+      const cc = v.charCodeAt(i)
+      if (cc >= 48 && cc <= 57) { sawDigit = true; i++ }
+      else if (cc === 46 && !sawDot) { sawDot = true; i++ }
+      else break
+    }
+    if (i < len) {
+      const ec = v.charCodeAt(i)
+      if (ec === 101 || ec === 69) {
+        i++
+        const sc = v.charCodeAt(i)
+        if (sc === 43 || sc === 45) i++
+        while (i < len) {
+          const cc = v.charCodeAt(i)
+          if (cc >= 48 && cc <= 57) i++
+          else break
+        }
+      }
+    }
+    if (!sawDigit) break
+    const n = Number.parseFloat(v.slice(start, i))
+    if (!Number.isFinite(n)) return undefined
+    nums.push(n)
+  }
+  if (nums.length !== 4) return undefined
+  if (nums[2]! < 0 || nums[3]! < 0) return undefined
+  return { x: nums[0]!, y: nums[1]!, width: nums[2]!, height: nums[3]! }
+}
+
 function parsePoints(v: string): Array<[number, number]> {
   const out: Array<[number, number]> = []
   if (v == null || v.length === 0) return out
@@ -550,6 +600,31 @@ function pickStyle(rawAttrs: Record<string, string>): StyleAttrs {
     }
   }
   else {
+    // Fast bail-out: if NO presentation attr is present (the common case for
+    // structural elements like <g>, <defs>, and most <rect>/<circle>s that
+    // only carry geometry), return an empty style object without running the
+    // 16+ key probes below.
+    if (
+      rawAttrs.fill === undefined
+      && rawAttrs.stroke === undefined
+      && rawAttrs.transform === undefined
+      && rawAttrs.opacity === undefined
+      && rawAttrs['fill-opacity'] === undefined
+      && rawAttrs['stroke-opacity'] === undefined
+      && rawAttrs['stroke-width'] === undefined
+      && rawAttrs['stroke-linecap'] === undefined
+      && rawAttrs['stroke-linejoin'] === undefined
+      && rawAttrs['stroke-miterlimit'] === undefined
+      && rawAttrs['stroke-dasharray'] === undefined
+      && rawAttrs['stroke-dashoffset'] === undefined
+      && rawAttrs['clip-path'] === undefined
+      && rawAttrs.mask === undefined
+      && rawAttrs['fill-rule'] === undefined
+      && rawAttrs['paint-order'] === undefined
+      && rawAttrs['vector-effect'] === undefined
+    ) {
+      return {}
+    }
     attrs = rawAttrs
   }
   const out: StyleAttrs = {}
@@ -667,15 +742,7 @@ function buildNode(raw: RawElement, vbWidth: number, vbHeight: number): SVGNode 
       return null
     case 'svg': {
       // viewBox first so child %-lengths can resolve against it.
-      const vb = attrs.viewBox
-        ? (() => {
-            const nums = attrs.viewBox.split(/[\s,]+/).filter(Boolean).map(Number)
-            if (nums.length !== 4) return undefined
-            // Per spec, negative width/height makes the viewBox invalid; ignore.
-            if (!nums.every(Number.isFinite) || nums[2]! < 0 || nums[3]! < 0) return undefined
-            return { x: nums[0]!, y: nums[1]!, width: nums[2]!, height: nums[3]! }
-          })()
-        : undefined
+      const vb = attrs.viewBox ? parseViewBox(attrs.viewBox) : undefined
       const width = parseLengthPercent(attrs.width, vb?.width ?? vbWidth, vb?.width ?? vbWidth)
       const height = parseLengthPercent(attrs.height, vb?.height ?? vbHeight, vb?.height ?? vbHeight)
       const par = parsePreserveAspectRatio(attrs.preserveAspectRatio)

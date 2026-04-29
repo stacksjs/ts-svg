@@ -217,8 +217,9 @@ export const fn: Plugin<RemoveHiddenElemsParams> = (root, params) => {
           }
         }
 
-        for (const [n, v] of Object.entries(node.attributes)) {
-          const ids = findReferences(n, v)
+        const attrs = node.attributes
+        for (const n in attrs) {
+          const ids = findReferences(n, attrs[n]!)
           for (const id of ids)
             allReferences.add(id)
         }

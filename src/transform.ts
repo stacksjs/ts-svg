@@ -11,6 +11,12 @@ import type { Matrix } from './types'
 export const IDENTITY: Matrix = [1, 0, 0, 1, 0, 0]
 
 export function multiply(a: Matrix, b: Matrix): Matrix {
+  // Identity short-circuits: a 6-element array allocation is non-trivial when
+  // it happens once per parser node and once per render-tree visit. The
+  // identity case dominates because most styled-attr-free groups inherit
+  // IDENTITY from their parent.
+  if (a === IDENTITY) return b
+  if (b === IDENTITY) return a
   // Right-multiplied: result = a * b, applied as p' = a(b(p))
   return [
     a[0] * b[0] + a[2] * b[1],

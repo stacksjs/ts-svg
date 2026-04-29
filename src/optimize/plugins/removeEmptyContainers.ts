@@ -18,7 +18,9 @@ export const fn: Plugin = (root) => {
     element: {
       enter: (node, parentNode) => {
         if (node.name === 'use') {
-          for (const [n, v] of Object.entries(node.attributes)) {
+          const attrs = node.attributes
+          for (const n in attrs) {
+            const v = attrs[n]!
             const ids = findReferences(n, v)
             for (const id of ids) {
               let refs = usesById.get(id)

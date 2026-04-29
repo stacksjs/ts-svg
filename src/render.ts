@@ -679,11 +679,20 @@ function drawShape(node: SVGNode, style: InheritedStyle, ctx: RenderCtx): void {
   // (and the stroke's bbox lookup for paint-server resolution) need it.
   const userPolys = shapeToPolys(node as SVGElementNode, ctx.tolerance, ctx.fontResolver)
   const finalT = multiply(ctx.rootTransform, style.transform)
-  const bbox = userPolys.length > 0 ? polysBBox(userPolys) : { x: 0, y: 0, width: 0, height: 0 }
 
   const fillRef = style.fillRef
   const strokeRef = style.strokeRef
   const fillRule = style.fillRule
+
+  // bbox is only needed when a paint server (`url(#id)`) reference resolves
+  // to a gradient. Solid-colour shapes (the overwhelming majority) skip the
+  // O(N) polygon scan entirely.
+  let cachedBBox: { x: number, y: number, width: number, height: number } | null = null
+  const getBBox = (): { x: number, y: number, width: number, height: number } => {
+    if (cachedBBox != null) return cachedBBox
+    cachedBBox = userPolys.length > 0 ? polysBBox(userPolys) : { x: 0, y: 0, width: 0, height: 0 }
+    return cachedBBox
+  }
 
   // Cache device-space polys lazily — both fill and stroke (and a few
   // diagnostic paths) may need them, but if the element has only fill
@@ -700,7 +709,11 @@ function drawShape(node: SVGNode, style: InheritedStyle, ctx: RenderCtx): void {
   const doFill = (): void => {
     if (userPolys.length === 0) return
     const fillBase = effectiveFill(style)
-    const fillPaint = resolvePaint(fillRef, fillBase, ctx.defs, bbox, finalT)
+    // resolvePaint only consults bbox when fillRef points at a gradient. So
+    // we skip the bbox compute on solid-colour fills (the common case).
+    const fillPaint = fillRef
+      ? resolvePaint(fillRef, fillBase, ctx.defs, getBBox(), finalT)
+      : fillBase
     if (fillPaint) fillPolygons(ctx.fb, getDevPolys(), fillPaint, fillRule)
   }
 
@@ -730,7 +743,9 @@ function drawShape(node: SVGNode, style: InheritedStyle, ctx: RenderCtx): void {
       dashOffset: style.strokeDashOffset * widthScale,
     }
     const baseStroke = strokeSpec?.color ?? null
-    const strokePaint = resolvePaint(strokeRef, baseStroke, ctx.defs, bbox, finalT)
+    const strokePaint = strokeRef
+      ? resolvePaint(strokeRef, baseStroke, ctx.defs, getBBox(), finalT)
+      : baseStroke
     if (!strokePaint) return
     if (node.tag === 'path') {
       const polylines = pathToPolylines(node as SVGPath, ctx.tolerance)

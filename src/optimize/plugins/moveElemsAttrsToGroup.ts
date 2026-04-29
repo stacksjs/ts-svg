@@ -35,9 +35,10 @@ export const fn: Plugin = (root) => {
               everyChildIsPath = false
             if (initial) {
               initial = false
-              for (const [n, v] of Object.entries(child.attributes)) {
+              const ca = child.attributes
+              for (const n in ca) {
                 if (inheritableAttrs.has(n))
-                  commonAttributes.set(n, v)
+                  commonAttributes.set(n, ca[n]!)
               }
             }
             else {
