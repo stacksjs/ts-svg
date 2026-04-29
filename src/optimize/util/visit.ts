@@ -38,7 +38,7 @@ export function visit(node: XastNode, visitor: Visitor, parentNode?: XastParent 
     descend = pc[pc.length - 1] === node || pc[0] === node || pc.indexOf(node) >= 0
   }
 
-  if (descend) {
+  if (descend && 'children' in node) {
     // Snapshot via index loop — callbacks may splice the array.
     const children = node.children
     const len = children.length

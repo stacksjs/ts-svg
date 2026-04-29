@@ -117,7 +117,7 @@ function blendPixel(fb: Framebuffer, x: number, y: number, color: RGBA, coverage
 let scratchBuckets: Array<number[] | undefined> = []
 let scratchRowSeen: Uint8Array = new Uint8Array(0)
 let scratchCov: Float32Array = new Float32Array(0)
-let scratchDirtyRows: number[] = []
+const scratchDirtyRows: number[] = []
 
 export function fillPolygons(
   fb: Framebuffer,

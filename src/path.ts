@@ -456,7 +456,7 @@ export function flattenCubic(
   depth = 0,
 ): void {
   const stack = cubicStack
-  let sp = stack.length
+  const sp = stack.length
   // Push the initial frame.
   stack.push(x0, y0, c1x, c1y, c2x, c2y, x1, y1, depth)
   const baseSp = sp

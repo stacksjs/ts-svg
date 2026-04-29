@@ -404,10 +404,10 @@ function clipFramebufferToRect(fb: Framebuffer, userToDev: Matrix, x: number, y:
   const fbW = fb.width
   const fbH = fb.height
   const data = fb.data
-  let xL = Math.floor(xMin); if (xL < 0) xL = 0
-  let yL = Math.floor(yMin); if (yL < 0) yL = 0
-  let xR = Math.ceil(xMax); if (xR > fbW) xR = fbW
-  let yR = Math.ceil(yMax); if (yR > fbH) yR = fbH
+  const xL = Math.max(0, Math.floor(xMin))
+  const yL = Math.max(0, Math.floor(yMin))
+  const xR = Math.min(fbW, Math.ceil(xMax))
+  const yR = Math.min(fbH, Math.ceil(yMax))
 
   for (let py = 0; py < fbH; py++) {
     const rowOff = py * fbW * 4
@@ -634,8 +634,8 @@ function drawImage(node: SVGImage, style: InheritedStyle, ctx: RenderCtx): void 
       if (ux < dx || ux >= dxEnd || uy < dy || uy >= dyEnd) continue
       const fx = (ux - dx) * sx
       const fy = (uy - dy) * sy
-      let ix = fx | 0; if (ix < 0) ix = 0; else if (ix > imgW - 2) ix = imgW - 2
-      let iy = fy | 0; if (iy < 0) iy = 0; else if (iy > imgH - 2) iy = imgH - 2
+      const ix = Math.min(imgW - 2, Math.max(0, fx | 0))
+      const iy = Math.min(imgH - 2, Math.max(0, fy | 0))
       const tx = fx - ix, ty = fy - iy
       const u = 1 - tx, v = 1 - ty
       const i00 = (iy * imgW + ix) * 4
