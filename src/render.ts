@@ -101,9 +101,35 @@ interface InheritedStyle {
 }
 
 function inheritStyle(parent: InheritedStyle, node: BaseNode): InheritedStyle {
-  const out: InheritedStyle = { ...parent }
-  // Thread `color` (cascaded) so `currentColor` references resolve correctly.
+  // Cheap-path: scan the node first for ANY override. If nothing overrides
+  // the parent style, we can return parent unchanged — the InheritedStyle
+  // object is read-only, so sharing the reference is safe and saves one
+  // 25-field shallow-clone per node visit.
   const colorAttr = node.attrs?.color
+  if (
+    colorAttr == null
+    && node.fill === undefined
+    && node.stroke === undefined
+    && node.strokeWidth == null
+    && !node.strokeLineCap
+    && !node.strokeLineJoin
+    && node.strokeMiterLimit == null
+    && !node.strokeDashArray
+    && node.strokeDashOffset == null
+    && node.opacity == null
+    && node.fillOpacity == null
+    && node.strokeOpacity == null
+    && !node.transform
+    && node.clipPath === undefined
+    && node.mask === undefined
+    && !node.fillRule
+    && !node.paintOrder
+    && !node.vectorEffect
+  ) {
+    return parent
+  }
+
+  const out: InheritedStyle = { ...parent }
   if (colorAttr) out.currentColor = parseColor(colorAttr, parent.currentColor)
   if (node.fill === null) { out.fill = null; out.fillRef = null }
   else if (node.fill !== undefined) {
@@ -150,16 +176,15 @@ function effectiveStroke(s: InheritedStyle): { color: RGBA, width: number } | nu
 
 /** Apply a 2x3 transform to a flat polygon `[x0, y0, x1, y1, ...]`.
  *
- * Returns a plain `number[]` because downstream consumers (rasterizer,
- * stroke pipeline) iterate via `[i]` indexing — both `Array` and
- * `Float64Array` support that, but the rasterizer's `Map<number, …>` keys
- * and edge-table arithmetic are slightly faster on regular arrays in V8.
- * Keeping `number[]` avoids hot-path conversions while still benefiting
- * from a single pre-sized allocation. */
+ * Pre-sized `new Array(n)` is significantly faster than `Array.from({length})`
+ * in V8/Bun (the latter goes through a generic iterable path). Identity
+ * transform returns the input directly — no allocation. */
 function transformPoly(poly: number[], m: Matrix): number[] {
   const n = poly.length
-  const out: number[] = Array.from({ length: n })
   const a = m[0], b = m[1], c = m[2], d = m[3], tx = m[4], ty = m[5]
+  // Identity fast-path — no copy needed because callers don't mutate.
+  if (a === 1 && b === 0 && c === 0 && d === 1 && tx === 0 && ty === 0) return poly
+  const out = new Array<number>(n)
   for (let i = 0; i < n; i += 2) {
     const x = poly[i]!, y = poly[i + 1]!
     out[i] = a * x + c * y + tx
@@ -216,20 +241,29 @@ function ellipseToPolys(cx: number, cy: number, rx: number, ry: number, toleranc
   if (rx <= 0 || ry <= 0) return []
   // For a circle of radius r, n equal-arc segments give max sagitta
   // r * (1 − cos(π/n)). Solve for n at the requested tolerance.
-  // Clamp the acos arg to (-1, 1) — if `tolerance` exceeds the radius the
-  // ratio goes negative or above 1 and acos returns NaN.
-  const r = Math.max(rx, ry)
-  const arg = Math.max(-1, Math.min(1, 1 - tolerance / r))
-  const denom = Math.acos(arg)
-  // For very flat tolerance vs radius, denom approaches 0 and n explodes —
-  // cap at 4096 segments which is well past visual perfection.
+  const r = rx > ry ? rx : ry
+  const arg = 1 - tolerance / r
+  const argClamped = arg < -1 ? -1 : arg > 1 ? 1 : arg
+  const denom = Math.acos(argClamped)
   const n = denom > 0
-    ? Math.max(16, Math.min(4096, Math.ceil(Math.PI / denom)))
+    ? (denom < Math.PI / 4096 ? 4096 : Math.ceil(Math.PI / denom) < 16 ? 16 : Math.ceil(Math.PI / denom))
     : 16
-  const pts: number[] = []
+  const pts = new Array<number>(n * 2)
+  // Two-mul rotation recurrence: (cos(a + da), sin(a + da)) computed as
+  //   cosNew = cos*c - sin*s
+  //   sinNew = sin*c + cos*s
+  // where (c, s) = (cos(da), sin(da)). One sin + one cos for the entire loop.
+  const da = (2 * Math.PI) / n
+  const c = Math.cos(da)
+  const s = Math.sin(da)
+  let cosA = 1
+  let sinA = 0
   for (let i = 0; i < n; i++) {
-    const a = (i / n) * 2 * Math.PI
-    pts.push(cx + Math.cos(a) * rx, cy + Math.sin(a) * ry)
+    pts[i * 2] = cx + cosA * rx
+    pts[i * 2 + 1] = cy + sinA * ry
+    const newCos = cosA * c - sinA * s
+    sinA = sinA * c + cosA * s
+    cosA = newCos
   }
   return [pts]
 }
@@ -295,16 +329,39 @@ function shapeToPolylines(node: SVGElementNode, tolerance: number, resolver: Fon
 
 /** Composite `src` over `dest` (Porter-Duff). Same dimensions assumed. */
 function compositeOver(dest: Framebuffer, src: Framebuffer): void {
-  for (let i = 0; i < dest.data.length; i += 4) {
-    const sa = src.data[i + 3]! / 255
+  const dd = dest.data
+  const sd = src.data
+  const len = dd.length
+  for (let i = 0; i < len; i += 4) {
+    const sa = sd[i + 3]!
     if (sa === 0) continue
-    const da = dest.data[i + 3]! / 255
-    const oa = sa + da * (1 - sa)
+    const da = dd[i + 3]!
+    if (da === 0) {
+      // Empty destination — straight copy.
+      dd[i] = sd[i]!
+      dd[i + 1] = sd[i + 1]!
+      dd[i + 2] = sd[i + 2]!
+      dd[i + 3] = sa
+      continue
+    }
+    if (sa === 255) {
+      // Opaque source — overwrites destination.
+      dd[i] = sd[i]!
+      dd[i + 1] = sd[i + 1]!
+      dd[i + 2] = sd[i + 2]!
+      dd[i + 3] = 255
+      continue
+    }
+    const sav = sa / 255
+    const dav = da / 255
+    const oneMinus = 1 - sav
+    const oa = sav + dav * oneMinus
     if (oa === 0) continue
-    dest.data[i] = Math.round((src.data[i]! * sa + dest.data[i]! * da * (1 - sa)) / oa)
-    dest.data[i + 1] = Math.round((src.data[i + 1]! * sa + dest.data[i + 1]! * da * (1 - sa)) / oa)
-    dest.data[i + 2] = Math.round((src.data[i + 2]! * sa + dest.data[i + 2]! * da * (1 - sa)) / oa)
-    dest.data[i + 3] = Math.round(oa * 255)
+    const inv = 1 / oa
+    dd[i]     = ((sd[i]!     * sav + dd[i]!     * dav * oneMinus) * inv + 0.5) | 0
+    dd[i + 1] = ((sd[i + 1]! * sav + dd[i + 1]! * dav * oneMinus) * inv + 0.5) | 0
+    dd[i + 2] = ((sd[i + 2]! * sav + dd[i + 2]! * dav * oneMinus) * inv + 0.5) | 0
+    dd[i + 3] = ((oa * 255) + 0.5) | 0
   }
 }
 
@@ -314,51 +371,75 @@ function compositeOver(dest: Framebuffer, src: Framebuffer): void {
  */
 function clipFramebufferToRect(fb: Framebuffer, userToDev: Matrix, x: number, y: number, w: number, h: number): void {
   // Map the rect's four corners and take the axis-aligned device-space bbox.
-  const corners: Array<[number, number]> = [
-    [x, y],
-    [x + w, y],
-    [x + w, y + h],
-    [x, y + h],
-  ]
-  let xMin = Infinity, yMin = Infinity, xMax = -Infinity, yMax = -Infinity
-  for (const [cx, cy] of corners) {
-    const dx = userToDev[0] * cx + userToDev[2] * cy + userToDev[4]
-    const dy = userToDev[1] * cx + userToDev[3] * cy + userToDev[5]
-    if (dx < xMin) xMin = dx
-    if (dy < yMin) yMin = dy
-    if (dx > xMax) xMax = dx
-    if (dy > yMax) yMax = dy
-  }
-  const xL = Math.max(0, Math.floor(xMin))
-  const yL = Math.max(0, Math.floor(yMin))
-  const xR = Math.min(fb.width, Math.ceil(xMax))
-  const yR = Math.min(fb.height, Math.ceil(yMax))
-  for (let py = 0; py < fb.height; py++) {
+  const a = userToDev[0], b = userToDev[1], c = userToDev[2], d = userToDev[3], tx = userToDev[4], ty = userToDev[5]
+  const x2 = x + w, y2 = y + h
+  // Inline the four corners — saves an array allocation + tuple destructuring.
+  const dx0 = a * x  + c * y  + tx, dy0 = b * x  + d * y  + ty
+  const dx1 = a * x2 + c * y  + tx, dy1 = b * x2 + d * y  + ty
+  const dx2 = a * x2 + c * y2 + tx, dy2 = b * x2 + d * y2 + ty
+  const dx3 = a * x  + c * y2 + tx, dy3 = b * x  + d * y2 + ty
+  let xMin = dx0, xMax = dx0, yMin = dy0, yMax = dy0
+  if (dx1 < xMin) xMin = dx1; if (dx1 > xMax) xMax = dx1
+  if (dx2 < xMin) xMin = dx2; if (dx2 > xMax) xMax = dx2
+  if (dx3 < xMin) xMin = dx3; if (dx3 > xMax) xMax = dx3
+  if (dy1 < yMin) yMin = dy1; if (dy1 > yMax) yMax = dy1
+  if (dy2 < yMin) yMin = dy2; if (dy2 > yMax) yMax = dy2
+  if (dy3 < yMin) yMin = dy3; if (dy3 > yMax) yMax = dy3
+
+  const fbW = fb.width
+  const fbH = fb.height
+  const data = fb.data
+  let xL = Math.floor(xMin); if (xL < 0) xL = 0
+  let yL = Math.floor(yMin); if (yL < 0) yL = 0
+  let xR = Math.ceil(xMax); if (xR > fbW) xR = fbW
+  let yR = Math.ceil(yMax); if (yR > fbH) yR = fbH
+
+  for (let py = 0; py < fbH; py++) {
+    const rowOff = py * fbW * 4
     if (py >= yL && py < yR) {
-      // Zero alpha outside [xL, xR) on this row.
-      for (let px = 0; px < xL; px++) fb.data[(py * fb.width + px) * 4 + 3] = 0
-      for (let px = xR; px < fb.width; px++) fb.data[(py * fb.width + px) * 4 + 3] = 0
+      // Zero alpha-channel byte (offset 3) for px in [0, xL) and [xR, fbW).
+      for (let px = 0; px < xL; px++) data[rowOff + px * 4 + 3] = 0
+      for (let px = xR; px < fbW; px++) data[rowOff + px * 4 + 3] = 0
     }
     else {
-      // Entire row is outside the region.
-      for (let px = 0; px < fb.width; px++) fb.data[(py * fb.width + px) * 4 + 3] = 0
+      // Entire row outside the region — zero every alpha byte in the row.
+      for (let px = 0; px < fbW; px++) data[rowOff + px * 4 + 3] = 0
     }
   }
 }
 
 /** Multiply target alpha by mask alpha pixel-by-pixel. */
 function multiplyAlpha(target: Framebuffer, mask: Framebuffer): void {
-  for (let i = 3; i < target.data.length; i += 4) {
-    target.data[i] = Math.round((target.data[i]! * mask.data[i]!) / 255)
+  const td = target.data
+  const md = mask.data
+  const len = td.length
+  // Bayer-like rounded integer multiply: (a*b + 127) / 255 ≈ Math.round(a*b/255)
+  // — accurate in [0, 255] without a divide.
+  for (let i = 3; i < len; i += 4) {
+    const t = td[i]!
+    if (t === 0) continue
+    const m = md[i]!
+    if (m === 255) continue
+    if (m === 0) { td[i] = 0; continue }
+    td[i] = ((t * m + 127) * 257) >>> 16
   }
 }
 
 /** Multiply target alpha by mask luminance (per SVG spec for `<mask>`). */
 function multiplyLuminance(target: Framebuffer, mask: Framebuffer): void {
-  for (let i = 0; i < target.data.length; i += 4) {
-    // ITU-R BT.601 luma weights × source alpha (premultiplied)
-    const lum = (0.299 * mask.data[i]! + 0.587 * mask.data[i + 1]! + 0.114 * mask.data[i + 2]!) * (mask.data[i + 3]! / 255)
-    target.data[i + 3] = Math.round(target.data[i + 3]! * (lum / 255))
+  const td = target.data
+  const md = mask.data
+  const len = td.length
+  for (let i = 0; i < len; i += 4) {
+    const ta = td[i + 3]!
+    if (ta === 0) continue
+    const ma = md[i + 3]!
+    if (ma === 0) { td[i + 3] = 0; continue }
+    // ITU-R BT.601 luma × source alpha — kept in floats since coefficients
+    // aren't integer-friendly, but we skip the divide via /255² combined.
+    const lum = (0.299 * md[i]! + 0.587 * md[i + 1]! + 0.114 * md[i + 2]!) * ma
+    // lum is in [0, 255²] now; we want round(ta * lum / 255²).
+    td[i + 3] = ((ta * lum) / 65025 + 0.5) | 0
   }
 }
 
@@ -497,54 +578,80 @@ function drawImage(node: SVGImage, style: InheritedStyle, ctx: RenderCtx): void 
   }
 
   // Walk the device-pixel bbox of the destination rect and sample the source.
-  const corners: Array<[number, number]> = [
-    [dx, dy], [dx + dw, dy], [dx + dw, dy + dh], [dx, dy + dh],
-  ]
-  let minPx = Infinity, minPy = Infinity, maxPx = -Infinity, maxPy = -Infinity
-  for (const [x, y] of corners) {
-    const px = finalT[0] * x + finalT[2] * y + finalT[4]
-    const py = finalT[1] * x + finalT[3] * y + finalT[5]
-    if (px < minPx) minPx = px; if (px > maxPx) maxPx = px
-    if (py < minPy) minPy = py; if (py > maxPy) maxPy = py
-  }
+  // Inline corners and finalT components to avoid the per-corner array alloc.
+  const fT0 = finalT[0], fT1 = finalT[1], fT2 = finalT[2], fT3 = finalT[3], fT4 = finalT[4], fT5 = finalT[5]
+  const dx2 = dx + dw, dy2 = dy + dh
+  const cdx0 = fT0 * dx  + fT2 * dy  + fT4, cdy0 = fT1 * dx  + fT3 * dy  + fT5
+  const cdx1 = fT0 * dx2 + fT2 * dy  + fT4, cdy1 = fT1 * dx2 + fT3 * dy  + fT5
+  const cdx2 = fT0 * dx2 + fT2 * dy2 + fT4, cdy2 = fT1 * dx2 + fT3 * dy2 + fT5
+  const cdx3 = fT0 * dx  + fT2 * dy2 + fT4, cdy3 = fT1 * dx  + fT3 * dy2 + fT5
+  let minPx = cdx0, maxPx = cdx0, minPy = cdy0, maxPy = cdy0
+  if (cdx1 < minPx) minPx = cdx1; if (cdx1 > maxPx) maxPx = cdx1
+  if (cdx2 < minPx) minPx = cdx2; if (cdx2 > maxPx) maxPx = cdx2
+  if (cdx3 < minPx) minPx = cdx3; if (cdx3 > maxPx) maxPx = cdx3
+  if (cdy1 < minPy) minPy = cdy1; if (cdy1 > maxPy) maxPy = cdy1
+  if (cdy2 < minPy) minPy = cdy2; if (cdy2 > maxPy) maxPy = cdy2
+  if (cdy3 < minPy) minPy = cdy3; if (cdy3 > maxPy) maxPy = cdy3
+
+  const fbW = ctx.fb.width
+  const fbH = ctx.fb.height
+  const fbData = ctx.fb.data
   const x0 = Math.max(0, Math.floor(minPx))
-  const x1 = Math.min(ctx.fb.width - 1, Math.ceil(maxPx))
+  const x1 = Math.min(fbW - 1, Math.ceil(maxPx))
   const y0 = Math.max(0, Math.floor(minPy))
-  const y1 = Math.min(ctx.fb.height - 1, Math.ceil(maxPy))
+  const y1 = Math.min(fbH - 1, Math.ceil(maxPy))
   const opacity = style.opacity * style.fillOpacity
 
+  // Hoist inverse + image dims.
+  const inv0 = inv[0], inv1 = inv[1], inv2 = inv[2], inv3 = inv[3], inv4 = inv[4], inv5 = inv[5]
+  const imgW = img.width, imgH = img.height, imgData = img.data
+  const sx = (imgW - 1) / dw
+  const sy = (imgH - 1) / dh
+  const dxEnd = dx + dw, dyEnd = dy + dh
+
   for (let py = y0; py <= y1; py++) {
+    const cy = py + 0.5
     for (let px = x0; px <= x1; px++) {
-      const cx = px + 0.5, cy = py + 0.5
-      const ux = inv[0] * cx + inv[2] * cy + inv[4]
-      const uy = inv[1] * cx + inv[3] * cy + inv[5]
-      if (ux < dx || ux >= dx + dw || uy < dy || uy >= dy + dh) continue
-      // Map dest-rect coord into source pixel coord (bilinear).
-      const fx = ((ux - dx) / dw) * (img.width - 1)
-      const fy = ((uy - dy) / dh) * (img.height - 1)
-      const ix = Math.max(0, Math.min(img.width - 2, Math.floor(fx)))
-      const iy = Math.max(0, Math.min(img.height - 2, Math.floor(fy)))
+      const cx = px + 0.5
+      const ux = inv0 * cx + inv2 * cy + inv4
+      const uy = inv1 * cx + inv3 * cy + inv5
+      if (ux < dx || ux >= dxEnd || uy < dy || uy >= dyEnd) continue
+      const fx = (ux - dx) * sx
+      const fy = (uy - dy) * sy
+      let ix = fx | 0; if (ix < 0) ix = 0; else if (ix > imgW - 2) ix = imgW - 2
+      let iy = fy | 0; if (iy < 0) iy = 0; else if (iy > imgH - 2) iy = imgH - 2
       const tx = fx - ix, ty = fy - iy
-      const blend = (channel: 0 | 1 | 2 | 3): number => {
-        const i00 = (iy * img.width + ix) * 4 + channel
-        const i10 = (iy * img.width + ix + 1) * 4 + channel
-        const i01 = ((iy + 1) * img.width + ix) * 4 + channel
-        const i11 = ((iy + 1) * img.width + ix + 1) * 4 + channel
-        const a = img.data[i00]! * (1 - tx) + img.data[i10]! * tx
-        const b = img.data[i01]! * (1 - tx) + img.data[i11]! * tx
-        return a * (1 - ty) + b * ty
+      const u = 1 - tx, v = 1 - ty
+      const i00 = (iy * imgW + ix) * 4
+      const i10 = i00 + 4
+      const i01 = i00 + imgW * 4
+      const i11 = i01 + 4
+      const r = (imgData[i00]!     * u + imgData[i10]!     * tx) * v + (imgData[i01]!     * u + imgData[i11]!     * tx) * ty
+      const g = (imgData[i00 + 1]! * u + imgData[i10 + 1]! * tx) * v + (imgData[i01 + 1]! * u + imgData[i11 + 1]! * tx) * ty
+      const b = (imgData[i00 + 2]! * u + imgData[i10 + 2]! * tx) * v + (imgData[i01 + 2]! * u + imgData[i11 + 2]! * tx) * ty
+      const a = ((imgData[i00 + 3]! * u + imgData[i10 + 3]! * tx) * v + (imgData[i01 + 3]! * u + imgData[i11 + 3]! * tx) * ty) * opacity
+      if (a <= 0) continue
+
+      const dstIdx = (py * fbW + px) * 4
+      const dstA = fbData[dstIdx + 3]!
+      if (dstA === 0) {
+        // Empty destination → straight write.
+        fbData[dstIdx] = (r + 0.5) | 0
+        fbData[dstIdx + 1] = (g + 0.5) | 0
+        fbData[dstIdx + 2] = (b + 0.5) | 0
+        fbData[dstIdx + 3] = (a + 0.5) | 0
+        continue
       }
-      const r = blend(0), g = blend(1), b = blend(2), a = blend(3) * opacity
-      // Composite over destination
-      const dstIdx = (py * ctx.fb.width + px) * 4
       const srcA = a / 255
-      const dstA = ctx.fb.data[dstIdx + 3]! / 255
-      const outA = srcA + dstA * (1 - srcA)
+      const dstAf = dstA / 255
+      const oneMinus = 1 - srcA
+      const outA = srcA + dstAf * oneMinus
       if (outA <= 0) continue
-      ctx.fb.data[dstIdx]     = Math.round((r * srcA + ctx.fb.data[dstIdx]!     * dstA * (1 - srcA)) / outA)
-      ctx.fb.data[dstIdx + 1] = Math.round((g * srcA + ctx.fb.data[dstIdx + 1]! * dstA * (1 - srcA)) / outA)
-      ctx.fb.data[dstIdx + 2] = Math.round((b * srcA + ctx.fb.data[dstIdx + 2]! * dstA * (1 - srcA)) / outA)
-      ctx.fb.data[dstIdx + 3] = Math.round(outA * 255)
+      const inv2d = 1 / outA
+      fbData[dstIdx]     = ((r * srcA + fbData[dstIdx]!     * dstAf * oneMinus) * inv2d + 0.5) | 0
+      fbData[dstIdx + 1] = ((g * srcA + fbData[dstIdx + 1]! * dstAf * oneMinus) * inv2d + 0.5) | 0
+      fbData[dstIdx + 2] = ((b * srcA + fbData[dstIdx + 2]! * dstAf * oneMinus) * inv2d + 0.5) | 0
+      fbData[dstIdx + 3] = ((outA * 255) + 0.5) | 0
     }
   }
 }
@@ -562,39 +669,57 @@ function drawShape(node: SVGNode, style: InheritedStyle, ctx: RenderCtx): void {
   const strokeRef = style.strokeRef
   const fillRule = style.fillRule
 
-  // Pre-build fill + stroke closures so paint-order can run them in either
-  // order without code duplication.
+  // Cache device-space polys lazily — both fill and stroke (and a few
+  // diagnostic paths) may need them, but if the element has only fill
+  // or only stroke, we'd waste a transform pass building the other.
+  let cachedDevPolys: number[][] | null = null
+  const getDevPolys = (): number[][] => {
+    if (cachedDevPolys != null) return cachedDevPolys
+    const out = new Array<number[]>(userPolys.length)
+    for (let i = 0; i < userPolys.length; i++) out[i] = transformPoly(userPolys[i]!, finalT)
+    cachedDevPolys = out
+    return out
+  }
+
   const doFill = (): void => {
     if (userPolys.length === 0) return
-    const devPolys = userPolys.map(p => transformPoly(p, finalT))
     const fillBase = effectiveFill(style)
     const fillPaint = resolvePaint(fillRef, fillBase, ctx.defs, bbox, finalT)
-    if (fillPaint) fillPolygons(ctx.fb, devPolys, fillPaint, fillRule)
+    if (fillPaint) fillPolygons(ctx.fb, getDevPolys(), fillPaint, fillRule)
   }
 
   const doStroke = (): void => {
     const strokeSpec = effectiveStroke(style)
     if (!strokeSpec && !strokeRef) return
-    const sx = Math.hypot(finalT[0], finalT[1])
-    const sy = Math.hypot(finalT[2], finalT[3])
-    const transformScale = (sx + sy) / 2 || 1
-    // vector-effect="non-scaling-stroke": the stroke ignores the user-space
-    // → device transform's scale, so a 1px stroke remains 1px regardless
-    // of zoom.
+    // |a + ic| for the X column gives the X scale magnitude; same for Y col.
+    const m0 = finalT[0], m1 = finalT[1], m2 = finalT[2], m3 = finalT[3]
+    const sx = Math.sqrt(m0 * m0 + m1 * m1)
+    const sy = Math.sqrt(m2 * m2 + m3 * m3)
+    const transformScale = (sx + sy) * 0.5 || 1
     const widthScale = style.vectorEffect === 'non-scaling-stroke' ? 1 : transformScale
+    const dashIn = style.strokeDashArray
+    const dashArray = dashIn.length === 0
+      ? dashIn
+      : (() => {
+          const out = new Array<number>(dashIn.length)
+          for (let i = 0; i < dashIn.length; i++) out[i] = dashIn[i]! * widthScale
+          return out
+        })()
     const strokeStyle: StrokeStyle = {
       width: (strokeSpec?.width ?? style.strokeWidth) * widthScale,
       cap: style.strokeLineCap,
       join: style.strokeLineJoin,
       miterLimit: style.strokeMiterLimit,
-      dashArray: style.strokeDashArray.map(d => d * widthScale),
+      dashArray,
       dashOffset: style.strokeDashOffset * widthScale,
     }
     const baseStroke = strokeSpec?.color ?? null
     const strokePaint = resolvePaint(strokeRef, baseStroke, ctx.defs, bbox, finalT)
     if (!strokePaint) return
     if (node.tag === 'path') {
-      for (const sp of pathToPolylines(node as SVGPath, ctx.tolerance)) {
+      const polylines = pathToPolylines(node as SVGPath, ctx.tolerance)
+      for (let i = 0; i < polylines.length; i++) {
+        const sp = polylines[i]!
         const dev = transformPoly(sp.points, finalT)
         strokePolylines(ctx.fb, [dev], strokePaint, strokeStyle, sp.closed)
       }
@@ -602,7 +727,8 @@ function drawShape(node: SVGNode, style: InheritedStyle, ctx: RenderCtx): void {
     else {
       const lp = shapeToPolylines(node as SVGElementNode, ctx.tolerance, ctx.fontResolver)
       if (lp.polys.length > 0) {
-        const devPolys = lp.polys.map(p => transformPoly(p, finalT))
+        const devPolys = new Array<number[]>(lp.polys.length)
+        for (let i = 0; i < lp.polys.length; i++) devPolys[i] = transformPoly(lp.polys[i]!, finalT)
         strokePolylines(ctx.fb, devPolys, strokePaint, strokeStyle, lp.closed)
       }
     }

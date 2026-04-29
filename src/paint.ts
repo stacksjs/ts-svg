@@ -5,41 +5,62 @@
  */
 
 import type { Matrix, RGBA, SVGGradient, SVGGradientStop, SVGLinearGradient, SVGRadialGradient } from './types'
-import { applyMatrix, invertMatrix } from './transform'
+import { invertMatrix } from './transform'
 
 /** Match a `fill: url(#id)` / `fill: url("#id")` reference. */
 const URL_REF_RE = /^url\(["']?#([^"')]+)["']?\)\s*$/
 
 export function parseUrlRef(value: string | undefined | null): string | null {
   if (!value) return null
-  const m = value.trim().match(URL_REF_RE)
+  // Cheap rejection — `url(` is 4 chars, anything starting with something
+  // else cannot match. Saves the trim+regex on the hot per-element path.
+  // Allow leading whitespace (rare but legal).
+  let i = 0
+  const len = value.length
+  while (i < len) {
+    const c = value.charCodeAt(i)
+    if (c === 32 || c === 9 || c === 10 || c === 13) i++
+    else break
+  }
+  if (i >= len) return null
+  if (value.charCodeAt(i) !== 117 /* u */) return null
+  if (i + 4 >= len) return null
+  if (value.charCodeAt(i + 1) !== 114 /* r */) return null
+  if (value.charCodeAt(i + 2) !== 108 /* l */) return null
+  if (value.charCodeAt(i + 3) !== 40 /* ( */) return null
+  const m = value.match(URL_REF_RE)
   return m ? m[1]! : null
 }
 
-/** Linearly interpolate two RGBA colours (premultiplied alpha). */
-function lerpColor(a: RGBA, b: RGBA, t: number): RGBA {
-  const u = 1 - t
-  return {
-    r: Math.round(a.r * u + b.r * t),
-    g: Math.round(a.g * u + b.g * t),
-    b: Math.round(a.b * u + b.b * t),
-    a: Math.round(a.a * u + b.a * t),
+/** Evaluate a stop list at parameter `t` and write into the supplied scratch RGBA. */
+function evalStopsInto(stops: SVGGradientStop[], t: number, out: RGBA): void {
+  const n = stops.length
+  if (n === 0) { out.r = 0; out.g = 0; out.b = 0; out.a = 0; return }
+  if (n === 1) {
+    const c = stops[0]!.color
+    out.r = c.r; out.g = c.g; out.b = c.b; out.a = c.a
+    return
   }
-}
-
-/** Evaluate a stop list at parameter `t` (already clamped/wrapped). */
-function evalStops(stops: SVGGradientStop[], t: number): RGBA {
-  if (stops.length === 0) return { r: 0, g: 0, b: 0, a: 0 }
-  if (stops.length === 1) return stops[0]!.color
-  // Find bracket
+  // Linear search — typical gradients have 2-4 stops, beating binary search.
   let lo = 0
-  while (lo + 1 < stops.length && stops[lo + 1]!.offset < t) lo++
+  while (lo + 1 < n && stops[lo + 1]!.offset < t) lo++
   const a = stops[lo]!
-  const b = stops[Math.min(lo + 1, stops.length - 1)]!
-  if (a === b) return a.color
+  const b = lo + 1 < n ? stops[lo + 1]! : a
+  if (a === b) {
+    const c = a.color
+    out.r = c.r; out.g = c.g; out.b = c.b; out.a = c.a
+    return
+  }
   const span = b.offset - a.offset
-  const u = span === 0 ? 0 : (t - a.offset) / span
-  return lerpColor(a.color, b.color, Math.max(0, Math.min(1, u)))
+  let u = span === 0 ? 0 : (t - a.offset) / span
+  if (u < 0) u = 0
+  else if (u > 1) u = 1
+  const v = 1 - u
+  const ca = a.color, cb = b.color
+  out.r = (ca.r * v + cb.r * u + 0.5) | 0
+  out.g = (ca.g * v + cb.g * u + 0.5) | 0
+  out.b = (ca.b * v + cb.b * u + 0.5) | 0
+  out.a = (ca.a * v + cb.a * u + 0.5) | 0
 }
 
 /** Apply spreadMethod to a raw t value (may be outside [0,1]). */
@@ -67,9 +88,15 @@ export interface PaintContext {
 /**
  * Build a sample-able paint function for a linear gradient. Takes device
  * pixel coords (x,y) and returns the gradient-evaluated colour.
+ *
+ * Per-pixel hot path:
+ *  - `applyMatrix` is inlined (saves a 2-element tuple alloc per pixel)
+ *  - the returned RGBA is a single scratch object filled in place per call
+ *    (callers consume it before calling sample again — matching how
+ *    fillPolygons reads it). Saves N×fb-pixels of `{r,g,b,a}` allocations
+ *    for a single-shape fill.
  */
 export function buildLinearGradientPaint(g: SVGLinearGradient, ctx: PaintContext): { sample: (x: number, y: number) => RGBA } {
-  // Resolve gradient axis in user space.
   let x1 = g.x1, y1 = g.y1, x2 = g.x2, y2 = g.y2
   if (g.units === 'objectBoundingBox') {
     x1 = ctx.bbox.x + ctx.bbox.width * g.x1
@@ -77,10 +104,13 @@ export function buildLinearGradientPaint(g: SVGLinearGradient, ctx: PaintContext
     x2 = ctx.bbox.x + ctx.bbox.width * g.x2
     y2 = ctx.bbox.y + ctx.bbox.height * g.y2
   }
-  // Apply gradientTransform (in user space).
   if (g.gradientTransform) {
-    [x1, y1] = applyMatrix(g.gradientTransform, x1, y1)
-    ;[x2, y2] = applyMatrix(g.gradientTransform, x2, y2)
+    const m = g.gradientTransform
+    const nx1 = m[0] * x1 + m[2] * y1 + m[4]
+    const ny1 = m[1] * x1 + m[3] * y1 + m[5]
+    const nx2 = m[0] * x2 + m[2] * y2 + m[4]
+    const ny2 = m[1] * x2 + m[3] * y2 + m[5]
+    x1 = nx1; y1 = ny1; x2 = nx2; y2 = ny2
   }
   const dx = x2 - x1
   const dy = y2 - y1
@@ -89,11 +119,19 @@ export function buildLinearGradientPaint(g: SVGLinearGradient, ctx: PaintContext
     const c = g.stops[g.stops.length - 1]?.color ?? { r: 0, g: 0, b: 0, a: 0 }
     return { sample: () => c }
   }
+  const invLenSq = 1 / lenSq
+  const stops = g.stops
+  const spread = g.spreadMethod
+  const dtu = ctx.devToUser
+  const m0 = dtu[0], m1 = dtu[1], m2 = dtu[2], m3 = dtu[3], m4 = dtu[4], m5 = dtu[5]
+  const scratch: RGBA = { r: 0, g: 0, b: 0, a: 0 }
   return {
     sample: (px, py) => {
-      const [ux, uy] = applyMatrix(ctx.devToUser, px, py)
-      const t = ((ux - x1) * dx + (uy - y1) * dy) / lenSq
-      return evalStops(g.stops, applySpread(t, g.spreadMethod))
+      const ux = m0 * px + m2 * py + m4
+      const uy = m1 * px + m3 * py + m5
+      const t = ((ux - x1) * dx + (uy - y1) * dy) * invLenSq
+      evalStopsInto(stops, applySpread(t, spread), scratch)
+      return scratch
     },
   }
 }
@@ -142,27 +180,40 @@ export function buildRadialGradientPaint(g: SVGRadialGradient, ctx: PaintContext
   const fxc = fx - cx, fyc = fy - cy
   const r2 = r * r
 
+  const stops = g.stops
+  const spread = g.spreadMethod
+  const dtu = ctx.devToUser
+  const dm0 = dtu[0], dm1 = dtu[1], dm2 = dtu[2], dm3 = dtu[3], dm4 = dtu[4], dm5 = dtu[5]
+  const tm0 = txm ? txm[0] : 0, tm1 = txm ? txm[1] : 0, tm2 = txm ? txm[2] : 0
+  const tm3 = txm ? txm[3] : 0, tm4 = txm ? txm[4] : 0, tm5 = txm ? txm[5] : 0
+  const scratch: RGBA = { r: 0, g: 0, b: 0, a: 0 }
   return {
     sample: (px, py) => {
-      let [ux, uy] = applyMatrix(ctx.devToUser, px, py)
-      if (txm) [ux, uy] = applyMatrix(txm, ux, uy)
-      // Intersect the ray F→P with the circle of radius r around C.
-      // Parametrise as Q(t) = F + t * (P - F); solve |Q - C|² = r².
+      let ux = dm0 * px + dm2 * py + dm4
+      let uy = dm1 * px + dm3 * py + dm5
+      if (txm) {
+        const nx = tm0 * ux + tm2 * uy + tm4
+        const ny = tm1 * ux + tm3 * uy + tm5
+        ux = nx; uy = ny
+      }
       const dx = ux - fx, dy = uy - fy
       const a = dx * dx + dy * dy
-      if (a === 0) return evalStops(g.stops, applySpread(0, g.spreadMethod))
+      if (a === 0) {
+        evalStopsInto(stops, applySpread(0, spread), scratch)
+        return scratch
+      }
       const b = dx * fxc + dy * fyc
       const c = fxc * fxc + fyc * fyc - r2
       const disc = b * b - a * c
       if (disc < 0) {
-        // Shouldn't happen after clamping, but guard.
-        return evalStops(g.stops, applySpread(1, g.spreadMethod))
+        evalStopsInto(stops, applySpread(1, spread), scratch)
+        return scratch
       }
-      // Take the positive root (forward along F→P direction).
       const sqrtD = Math.sqrt(disc)
       const tExit = (-b + sqrtD) / a
       const t = tExit > 0 ? 1 / tExit : 0
-      return evalStops(g.stops, applySpread(t, g.spreadMethod))
+      evalStopsInto(stops, applySpread(t, spread), scratch)
+      return scratch
     },
   }
 }

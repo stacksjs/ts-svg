@@ -545,13 +545,23 @@ function strokeOutline(poly: number[], st: StrokeStyle, closed: boolean): number
 
 /** Walk one polyline applying dasharray + dashoffset, returning the dash subpaths. */
 function dashedSubpaths(poly: number[], dashArray: number[], dashOffset: number, closed: boolean): number[][] {
-  // Total dash period
-  const period = dashArray.reduce((s, n) => s + n, 0)
+  let period = 0
+  for (let i = 0; i < dashArray.length; i++) period += dashArray[i]!
   if (period <= 0) return [poly]
 
   // Effective array: if odd length, double per spec.
-  const arr = dashArray.length % 2 === 1 ? [...dashArray, ...dashArray] : dashArray.slice()
-  const periodEff = arr.reduce((s, n) => s + n, 0)
+  let arr: number[]
+  let periodEff: number
+  if ((dashArray.length & 1) === 1) {
+    const inLen = dashArray.length
+    arr = new Array<number>(inLen * 2)
+    for (let i = 0; i < inLen; i++) { arr[i] = dashArray[i]!; arr[i + inLen] = dashArray[i]! }
+    periodEff = period * 2
+  }
+  else {
+    arr = dashArray
+    periodEff = period
+  }
 
   // Resolve initial state from dashOffset.
   let off = dashOffset % periodEff

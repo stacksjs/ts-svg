@@ -45,70 +45,53 @@ function isDigit(c: string): boolean {
   return code >= 48 && code <= 57
 }
 
-type ReadNumberState
-  = | 'none'
-    | 'sign'
-    | 'whole'
-    | 'decimal_point'
-    | 'decimal'
-    | 'e'
-    | 'exponent_sign'
-    | 'exponent'
-
+/**
+ * Read a single SVG path number starting at `cursor`. Returns
+ * `[lastIndexConsumed, value]` or `[cursor, null]` if the input is malformed.
+ *
+ * Hot path: char-code-driven boundary detection then a single
+ * `parseFloat(slice)` — much cheaper than the original char-by-char
+ * `value += c` loop, which created a new string per character.
+ */
 function readNumber(string: string, cursor: number): [number, number | null] {
+  const len = string.length
   let i = cursor
-  let value = ''
-  let state: ReadNumberState = 'none'
-  for (; i < string.length; i++) {
-    const c = string[i]!
-    if (c === '+' || c === '-') {
-      if (state === 'none') {
-        state = 'sign'
-        value += c
-        continue
-      }
-      if (state === 'e') {
-        state = 'exponent_sign'
-        value += c
-        continue
-      }
-    }
-    if (isDigit(c)) {
-      if (state === 'none' || state === 'sign' || state === 'whole') {
-        state = 'whole'
-        value += c
-        continue
-      }
-      if (state === 'decimal_point' || state === 'decimal') {
-        state = 'decimal'
-        value += c
-        continue
-      }
-      if (state === 'e' || state === 'exponent_sign' || state === 'exponent') {
-        state = 'exponent'
-        value += c
-        continue
-      }
-    }
-    if (c === '.') {
-      if (state === 'none' || state === 'sign' || state === 'whole') {
-        state = 'decimal_point'
-        value += c
-        continue
-      }
-    }
-    if (c === 'E' || c === 'e') {
-      if (state === 'whole' || state === 'decimal_point' || state === 'decimal') {
-        state = 'e'
-        value += c
-        continue
-      }
-    }
-    break
+  // Optional sign
+  if (i < len) {
+    const c = string.charCodeAt(i)
+    if (c === 43 /* + */ || c === 45 /* - */) i++
   }
-  const num = Number.parseFloat(value)
-  if (Number.isNaN(num))
-    return [cursor, null]
+  let sawDigit = false
+  let sawDot = false
+  while (i < len) {
+    const c = string.charCodeAt(i)
+    if (c >= 48 && c <= 57) { sawDigit = true; i++ }
+    else if (c === 46 /* . */ && !sawDot) { sawDot = true; i++ }
+    else break
+  }
+  // Exponent
+  if (sawDigit && i < len) {
+    const c = string.charCodeAt(i)
+    if (c === 101 /* e */ || c === 69 /* E */) {
+      const expStart = i
+      i++
+      if (i < len) {
+        const sc = string.charCodeAt(i)
+        if (sc === 43 || sc === 45) i++
+      }
+      let sawExpDigit = false
+      while (i < len) {
+        const c2 = string.charCodeAt(i)
+        if (c2 >= 48 && c2 <= 57) { sawExpDigit = true; i++ }
+        else break
+      }
+      // Roll back if exponent had no digits — `1e` is invalid by spec.
+      if (!sawExpDigit) i = expStart
+    }
+  }
+  if (!sawDigit) return [cursor, null]
+  const num = Number.parseFloat(string.slice(cursor, i))
+  if (Number.isNaN(num)) return [cursor, null]
   return [i - 1, num]
 }
 

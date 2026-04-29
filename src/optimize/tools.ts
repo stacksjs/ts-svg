@@ -90,14 +90,22 @@ export function cleanupOutData(
  * Strip leading zero on values in (-1, 1).
  *   0.5 → .5
  *  -0.5 → -.5
+ *
+ * Hot path: called once per path-arg per stringify pass. Avoid `.startsWith`
+ * (which allocates an iterator) and skip `.slice` for integers / |v| ≥ 1
+ * where there's no leading zero to strip.
  */
 export function removeLeadingZero(value: number): string {
-  const strValue = value.toString()
-  if (value > 0 && value < 1 && strValue.startsWith('0'))
-    return strValue.slice(1)
-  if (value > -1 && value < 0 && strValue[1] === '0')
-    return strValue[0]! + strValue.slice(2)
-  return strValue
+  // Branchless filter for the only case that matters: -1 < v < 1 (excluding 0).
+  if (value === 0 || value <= -1 || value >= 1) return value.toString()
+  const s = value.toString()
+  // Positive: "0.x..." → ".x..."
+  if (s.charCodeAt(0) === 48 /* 0 */ && s.charCodeAt(1) === 46 /* . */) return s.slice(1)
+  // Negative: "-0.x..." → "-.x..."
+  if (s.charCodeAt(0) === 45 /* - */ && s.charCodeAt(1) === 48 && s.charCodeAt(2) === 46) {
+    return `-${s.slice(2)}`
+  }
+  return s
 }
 
 const hasScriptsEventAttrs: ReadonlyArray<string> = [

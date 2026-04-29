@@ -127,21 +127,22 @@ function parseRaw(svg: string): RawElement | null {
     let c = svg.charCodeAt(i)
 
     if (c !== 60 /* < */) {
-      // Text content — read until next `<`.
+      // Text content — read until next `<`. Track whether we ever see a
+      // non-whitespace char in the same pass so we can skip allocating a
+      // slice for pure-whitespace runs (the common case between sibling
+      // elements in indented SVG).
       const start = i
-      while (i < len && svg.charCodeAt(i) !== 60) i++
-      if (stack.length > 0) {
-        const raw = svg.slice(start, i)
-        // Skip whitespace-only text fast (no allocation for trim/decode).
-        let allWs = true
-        for (let k = 0; k < raw.length; k++) {
-          const cc = raw.charCodeAt(k)
-          if (cc !== 32 && cc !== 9 && cc !== 10 && cc !== 13) { allWs = false; break }
-        }
-        if (!allWs) {
-          const text = decodeEntities(raw)
-          stack[stack.length - 1]!.children.push({ tag: '#text', text })
-        }
+      let allWs = c === 32 || c === 9 || c === 10 || c === 13
+      i++
+      while (i < len) {
+        const cc = svg.charCodeAt(i)
+        if (cc === 60) break
+        if (allWs && cc !== 32 && cc !== 9 && cc !== 10 && cc !== 13) allWs = false
+        i++
+      }
+      if (!allWs && stack.length > 0) {
+        const text = decodeEntities(svg.slice(start, i))
+        stack[stack.length - 1]!.children.push({ tag: '#text', text })
       }
       continue
     }
