@@ -64,6 +64,10 @@ export function svgToPng(svg: string, opts?: RenderOptions): Buffer {
   return encodePng(fb)
 }
 
+// ----- raster-to-SVG tracer -----
+export { traceImage } from './trace'
+export type { TraceImageInput, TraceImageOptions, TraceImageResult } from './trace'
+
 // ----- optimizer subsystem -----
 export { builtinPlugins, optimize, parseSvg, stringifySvg, SvgParserError } from './optimize'
 export type {
