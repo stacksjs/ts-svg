@@ -135,7 +135,7 @@ export function parsePathData(string: string): PathDataItem[] {
       return pathData
 
     // eslint-disable-next-line prefer-const -- both reassigned via destructuring below
-    let newCursor = i
+    const newCursor = i
     let number: number | null = null
     if (command === 'A' || command === 'a') {
       const position = args.length
