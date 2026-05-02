@@ -134,13 +134,18 @@ export function parsePathData(string: string): PathDataItem[] {
     if (command == null)
       return pathData
 
-    // eslint-disable-next-line prefer-const -- both reassigned via destructuring below
-    const newCursor = i
+    // Use direct assignment instead of destructuring — pickier's
+    // prefer-const rule doesn't recognise destructuring targets as
+    // reassignments and would otherwise rewrite this `let` to `const`.
+    let newCursor = i
     let number: number | null = null
     if (command === 'A' || command === 'a') {
       const position = args.length
-      if (position === 0 || position === 1 || position === 2 || position === 5 || position === 6)
-        [newCursor, number] = readNumber(string, i)
+      if (position === 0 || position === 1 || position === 2 || position === 5 || position === 6) {
+        const r = readNumber(string, i)
+        newCursor = r[0]
+        number = r[1]
+      }
       if (position === 3 || position === 4) {
         if (c === '0')
           number = 0
@@ -149,7 +154,9 @@ export function parsePathData(string: string): PathDataItem[] {
       }
     }
     else {
-      [newCursor, number] = readNumber(string, i)
+      const r = readNumber(string, i)
+      newCursor = r[0]
+      number = r[1]
     }
     if (number == null)
       return pathData
