@@ -1,3 +1,42 @@
+[Compare changes](https://github.com/stacksjs/ts-svg/compare/v0.1.1...v0.1.2)
+
+## 🐛 Bug Fixes
+
+- remove consumer postinstall hook ([19d3d8d](https://github.com/stacksjs/ts-svg/commit/19d3d8d)) _(by Chris <chrisbreuer93@gmail.com>)_
+- **scripts**: stop double-generating CHANGELOG on release ([eea56bf](https://github.com/stacksjs/ts-svg/commit/eea56bf)) _(by Glenn Michael Torregosa <gtorregosa@gmail.com>)_
+- **build**: use direct assignment over destructuring in parsePathData ([75b6b1b](https://github.com/stacksjs/ts-svg/commit/75b6b1b)) _(by glennmichael123 <gtorregosa@gmail.com>)_
+
+## 🤖 Continuous Integration
+
+- drop redundant setup-bun in publish-commit (pantry installs bun) ([bb91b27](https://github.com/stacksjs/ts-svg/commit/bb91b27)) _(by glennmichael123 <gtorregosa@gmail.com>)_
+
+## 🧹 Chores
+
+- release v0.1.2 ([88cda61](https://github.com/stacksjs/ts-svg/commit/88cda61)) _(by Chris <chrisbreuer93@gmail.com>)_
+- **deps**: declare bun ^1.3.14 in deps.yaml ([035ca54](https://github.com/stacksjs/ts-svg/commit/035ca54)) _(by Chris <chrisbreuer93@gmail.com>)_
+- **deps**: refresh bun.lock to pick up pickier 0.1.37 ([329c76a](https://github.com/stacksjs/ts-svg/commit/329c76a)) _(by glennmichael123 <gtorregosa@gmail.com>)_
+- **deps**: refresh bun.lock to pick up pickier 0.1.35 ([d4e64ab](https://github.com/stacksjs/ts-svg/commit/d4e64ab)) _(by glennmichael123 <gtorregosa@gmail.com>)_
+- **deps**: refresh bun.lock to pick up pickier 0.1.33 ([590cffb](https://github.com/stacksjs/ts-svg/commit/590cffb)) _(by glennmichael123 <gtorregosa@gmail.com>)_
+- **deps**: refresh bun.lock to pick up @stacksjs/logsmith 0.2.3 ([2a8e558](https://github.com/stacksjs/ts-svg/commit/2a8e558)) _(by glennmichael123 <gtorregosa@gmail.com>)_
+- **deps**: refresh bun.lock to pick up buddy-bot 0.9.20 ([1c51efd](https://github.com/stacksjs/ts-svg/commit/1c51efd)) _(by glennmichael123 <gtorregosa@gmail.com>)_
+- **deps**: bump better-dx to ^0.2.15 ([0ad0241](https://github.com/stacksjs/ts-svg/commit/0ad0241)) _(by glennmichael123 <gtorregosa@gmail.com>)_
+- **ci**: bump actions/checkout to v6, actions/cache to v5 ([2335518](https://github.com/stacksjs/ts-svg/commit/2335518)) _(by glennmichael123 <gtorregosa@gmail.com>)_
+- refresh bun.lock to pick up bun-plugin-dtsx@0.9.18 ([52238c4](https://github.com/stacksjs/ts-svg/commit/52238c4)) _(by glennmichael123 <gtorregosa@gmail.com>)_
+- refresh bun.lock and apply pickier --fix ([7fdc0cf](https://github.com/stacksjs/ts-svg/commit/7fdc0cf)) _(by glennmichael123 <gtorregosa@gmail.com>)_
+- refresh bun.lock ([a0f900c](https://github.com/stacksjs/ts-svg/commit/a0f900c)) _(by glennmichael123 <gtorregosa@gmail.com>)_
+- lint:fix ([b30afbf](https://github.com/stacksjs/ts-svg/commit/b30afbf)) _(by glennmichael123 <gtorregosa@gmail.com>)_
+- refresh bun.lock to pick up latest pickier ([06fec11](https://github.com/stacksjs/ts-svg/commit/06fec11)) _(by glennmichael123 <gtorregosa@gmail.com>)_
+
+## ⏪ Reverts
+
+- keep staged-lint kebab + bunx gitlint shorthand ([2940b3d](https://github.com/stacksjs/ts-svg/commit/2940b3d)) _(by glennmichael123 <gtorregosa@gmail.com>)_
+
+## Contributors
+
+- _Chris <chrisbreuer93@gmail.com>_
+- _Glenn Michael Torregosa <gtorregosa@gmail.com>_
+- _glennmichael123 <gtorregosa@gmail.com>_
+
 [Compare changes](https://github.com/stacksjs/ts-svg/compare/v0.1.0...v0.1.1)
 
 ### 🚀 Features
