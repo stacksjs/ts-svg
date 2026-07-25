@@ -67,7 +67,7 @@ See the [Features section](/features/parser) for deep dives on each capability.
 ## Community
 
 - [Discussions on GitHub](https://github.com/stacksjs/ts-svg/discussions)
-- [Stacks Discord](https://discord.gg/stacksjs)
+- [Stacks Discord](https://stacksjs.com/discord)
 
 ## License
 
