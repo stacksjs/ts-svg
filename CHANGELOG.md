@@ -1,3 +1,25 @@
+[Compare changes](https://github.com/stacksjs/ts-svg/compare/v0.1.2...v0.1.3)
+
+## ⚡ Performance Improvements
+
+- **build**: build the library and the CLI together ([4463319](https://github.com/stacksjs/ts-svg/commit/4463319)) _(by Chris <chrisbreuer93@gmail.com>)_
+
+## 📚 Documentation
+
+- link the community as stacksjs.com/discord ([863ef3b](https://github.com/stacksjs/ts-svg/commit/863ef3b)) _(by Chris <chrisbreuer93@gmail.com>)_
+
+## 🤖 Continuous Integration
+
+- publish releases with OIDC ([fac70ee](https://github.com/stacksjs/ts-svg/commit/fac70ee)) _(by Chris <chrisbreuer93@gmail.com>)_
+
+## 🧹 Chores
+
+- release v0.1.3 ([2f07b16](https://github.com/stacksjs/ts-svg/commit/2f07b16)) _(by Chris <chrisbreuer93@gmail.com>)_
+
+## Contributors
+
+- _Chris <chrisbreuer93@gmail.com>_
+
 [Compare changes](https://github.com/stacksjs/ts-svg/compare/v0.1.1...v0.1.2)
 
 ## 🐛 Bug Fixes
