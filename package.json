@@ -80,14 +80,14 @@
     "format:fix": "bunx --bun pickier . --format --write"
   },
   "dependencies": {
-    "@stacksjs/ts-css": "^0.1.0",
-    "@stacksjs/ts-png": "^0.1.2"
+    "@stacksjs/ts-css": "^0.1.4",
+    "@stacksjs/ts-png": "^0.1.8"
   },
   "devDependencies": {
     "@types/bun": "latest",
-    "better-dx": "^0.2.15",
+    "better-dx": "^0.2.25",
     "mitata": "^1.0.34",
-    "svgo": "^4.0.1"
+    "svgo": "^4.0.2"
   },
   "git-hooks": {
     "pre-commit": {
