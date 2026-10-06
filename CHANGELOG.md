@@ -1,3 +1,20 @@
+[Compare changes](https://github.com/stacksjs/ts-svg/compare/v0.1.3...v0.1.4)
+
+## 🐛 Bug Fixes
+
+- **deps**: require ts-css ^0.3.8 ([fd042c8](https://github.com/stacksjs/ts-svg/commit/fd042c8)) _(by Chris <chrisbreuer93@gmail.com>)_
+- **ci**: setup-php 2.37.1, which closes the open advisory ([a71442e](https://github.com/stacksjs/ts-svg/commit/a71442e)) _(by Chris <chrisbreuer93@gmail.com>)_
+
+## 🧹 Chores
+
+- release v0.1.4 ([d4d3809](https://github.com/stacksjs/ts-svg/commit/d4d3809)) _(by Chris <chrisbreuer93@gmail.com>)_
+- run @stacksjs/logsmith, not the unrelated npm 'logsmith' ([5a768bc](https://github.com/stacksjs/ts-svg/commit/5a768bc)) _(by Chris <chrisbreuer93@gmail.com>)_
+- release through @stacksjs/bumpx, not the unrelated npm 'bumpx' ([2e3abdc](https://github.com/stacksjs/ts-svg/commit/2e3abdc)) _(by Chris <chrisbreuer93@gmail.com>)_
+
+## Contributors
+
+- _Chris <chrisbreuer93@gmail.com>_
+
 [Compare changes](https://github.com/stacksjs/ts-svg/compare/v0.1.2...v0.1.3)
 
 ## ⚡ Performance Improvements
