@@ -80,7 +80,7 @@
     "format:fix": "bunx --bun pickier . --format --write"
   },
   "dependencies": {
-    "@stacksjs/ts-css": "^0.1.0",
+    "@stacksjs/ts-css": "^0.3.8",
     "@stacksjs/ts-png": "^0.1.2"
   },
   "devDependencies": {
