@@ -81,13 +81,13 @@
   },
   "dependencies": {
     "@stacksjs/ts-css": "^0.3.8",
-    "@stacksjs/ts-png": "^0.1.2"
+    "@stacksjs/ts-png": "^0.1.8"
   },
   "devDependencies": {
     "@types/bun": "latest",
-    "better-dx": "^0.2.15",
+    "better-dx": "^0.2.37",
     "mitata": "^1.0.34",
-    "svgo": "^4.0.1"
+    "svgo": "^4.1.0"
   },
   "git-hooks": {
     "pre-commit": {
