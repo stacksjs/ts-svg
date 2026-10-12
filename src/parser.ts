@@ -509,14 +509,52 @@ function compileSelector(sel: string): CssRule['matches'] | null {
   return null
 }
 
-function parseStylesheet(css: string): CssRule[] {
+/** Which colour scheme a stylesheet's `@media (prefers-color-scheme: …)` rules are read for. */
+export type ColorScheme = 'light' | 'dark'
+
+export interface ParseOptions {
+  /**
+   * The colour scheme to draw the SVG in. A logo that turns its ink white
+   * under `@media (prefers-color-scheme: dark)` is drawn that way when this is
+   * `'dark'`, as a browser would draw it on a dark page. @default 'light'
+   */
+  colorScheme?: ColorScheme
+}
+
+/** Whether an `@media` query holds for a drawing: only the colour scheme is known here. */
+function mediaApplies(query: string, colorScheme: ColorScheme): boolean {
+  const scheme = /prefers-color-scheme\s*:\s*(dark|light)/i.exec(query)?.[1]?.toLowerCase()
+  if (scheme)
+    return scheme === colorScheme
+  // `@media all`, `@media screen`: true of any drawing. Anything else
+  // (print, a width) is about a page, not an image.
+  return /^\s*(?:all|screen)?\s*$/i.test(query)
+}
+
+function parseStylesheet(css: string, colorScheme: ColorScheme = 'light'): CssRule[] {
   const stripped = css.replace(/\/\*[\s\S]*?\*\//g, '')
   const rules: CssRule[] = []
-  const re = /([^{}]+)\{([^}]*)\}/g
-  let m: RegExpExecArray | null
-  while ((m = re.exec(stripped)) != null) {
-    const selectors = m[1]!.split(',').map(s => s.trim()).filter(Boolean)
-    const decls = m[2]!.trim()
+  let index = 0
+  while (index < stripped.length) {
+    const open = stripped.indexOf('{', index)
+    if (open === -1) break
+    // The block's body, to its matching brace: an @media block holds rules.
+    let depth = 1
+    let close = open + 1
+    for (; close < stripped.length && depth > 0; close++) {
+      if (stripped[close] === '{') depth++
+      else if (stripped[close] === '}') depth--
+    }
+    const prelude = stripped.slice(index, open).trim()
+    const body = stripped.slice(open + 1, close - 1)
+    index = close
+    if (prelude.startsWith('@')) {
+      const media = /^@media\b([\s\S]*)$/i.exec(prelude)
+      if (media && mediaApplies(media[1]!, colorScheme)) rules.push(...parseStylesheet(body, colorScheme))
+      continue
+    }
+    const selectors = prelude.split(',').map(s => s.trim()).filter(Boolean)
+    const decls = body.trim()
     const matchers = selectors
       .map(compileSelector)
       .filter((f): f is CssRule['matches'] => f != null)
@@ -529,10 +567,10 @@ function parseStylesheet(css: string): CssRule[] {
   return rules
 }
 
-function collectStylesheets(el: RawElement): CssRule[] {
+function collectStylesheets(el: RawElement, colorScheme: ColorScheme = 'light'): CssRule[] {
   const out: CssRule[] = []
   const walk = (e: RawElement): void => {
-    if (e.tag === 'style') out.push(...parseStylesheet(collectText(e)))
+    if (e.tag === 'style') out.push(...parseStylesheet(collectText(e), colorScheme))
     for (const c of e.children) {
       if (c.tag !== '#text') walk(c as RawElement)
     }
@@ -549,8 +587,10 @@ function collectStylesheets(el: RawElement): CssRule[] {
 function applyStylesheets(rules: CssRule[], tag: string, attrs: Record<string, string>): void {
   if (rules.length === 0) return
   const accum: string[] = []
-  for (const r of rules) {
-    if (r.matches(tag, attrs)) accum.push(r.declarations)
+  // Later rules win in CSS, and pickStyle keeps the first value it meets,
+  // so the last matching rule goes first.
+  for (let i = rules.length - 1; i >= 0; i--) {
+    if (rules[i]!.matches(tag, attrs)) accum.push(rules[i]!.declarations)
   }
   if (accum.length === 0) return
   // pickStyle iterates the merged style string with FIRST-WINS semantics,
@@ -1167,7 +1207,7 @@ function collectDefs(raw: RawElement, vbW: number, vbH: number): SVGDefs {
  *
  * Throws if the input doesn't contain a top-level `<svg>` element.
  */
-export function parseSVG(svg: string | Uint8Array | ArrayBuffer): SVGRoot {
+export function parseSVG(svg: string | Uint8Array | ArrayBuffer, options: ParseOptions = {}): SVGRoot {
   // Coerce binary inputs (typical when reading from disk via `Bun.file().bytes()`).
   let src: string
   if (typeof svg === 'string') {
@@ -1195,7 +1235,7 @@ export function parseSVG(svg: string | Uint8Array | ArrayBuffer): SVGRoot {
   // Pre-pass: collect <style> stylesheets and project them onto every raw
   // element's `style=` attribute. Done as a tree walk before buildNode so
   // pickStyle's existing precedence rules apply to the cascaded values.
-  const sheets = collectStylesheets(raw)
+  const sheets = collectStylesheets(raw, options.colorScheme ?? 'light')
   if (sheets.length > 0) {
     const apply = (e: RawElement): void => {
       applyStylesheets(sheets, e.tag, e.attrs)

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'bun:test'
 import png from '@stacksjs/ts-png'
-import { BLACK, parseColor, parsePath, parseSVG, Resvg, TRANSPARENT } from '../src'
+import { BLACK, parseColor, parsePath, parseSVG, rasterize, Resvg, TRANSPARENT } from '../src'
 
 interface Pixel { r: number, g: number, b: number, a: number }
 
@@ -399,5 +399,35 @@ describe('flattenCommands: drawing continues after Z without an explicit M', () 
     // Pixel (5, 30) sits on the left edge created by the post-Z `L 5 55` line.
     const p = pixelAt(buf, 5, 30)
     expect(p.r).toBeLessThan(120)
+  })
+})
+
+describe('stylesheet cascade and colour scheme', () => {
+  const logo = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 4 4">
+    <style>
+      .ink { fill: #102030 }
+      @media (prefers-color-scheme: dark) { .ink { fill: #ffffff } }
+      @media print { .ink { fill: #ff0000 } }
+    </style>
+    <rect class="ink" x="0" y="0" width="4" height="4" />
+  </svg>`
+  const pixel = (svg: string, options: { colorScheme?: 'light' | 'dark' } = {}) => {
+    const fb = rasterize(parseSVG(svg, options), { width: 4, height: 4 })
+    return Array.from(fb.data.slice(0, 4))
+  }
+
+  it('draws a stylesheet\'s light rules by default and its dark rules when asked', () => {
+    expect(pixel(logo)).toEqual([0x10, 0x20, 0x30, 255])
+    expect(pixel(logo, { colorScheme: 'dark' })).toEqual([255, 255, 255, 255])
+  })
+
+  it('lets the later of two equal rules win, as CSS does', () => {
+    const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 4 4"><style>.a { fill: #ff0000 } .a { fill: #0000ff }</style><rect class="a" width="4" height="4" /></svg>`
+    expect(pixel(svg)).toEqual([0, 0, 255, 255])
+  })
+
+  it('keeps an inline style over the stylesheet', () => {
+    const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 4 4"><style>.a { fill: #ff0000 }</style><rect class="a" style="fill: #00ff00" width="4" height="4" /></svg>`
+    expect(pixel(svg)).toEqual([0, 255, 0, 255])
   })
 })

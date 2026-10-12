@@ -40,6 +40,7 @@ export type {
   SVGUse,
 } from './types'
 
+export type { ColorScheme, ParseOptions } from './parser'
 export { parseSVG } from './parser'
 export type { PathCmd } from './path'
 export { arcToCubics, flattenCommands, flattenCubic, flattenQuadratic, parsePath } from './path'
@@ -53,13 +54,13 @@ export type { ResvgFitTo, ResvgOptions } from './resvg'
 export { RenderedImage, Resvg } from './resvg'
 
 import type { Buffer } from 'node:buffer'
-import { parseSVG } from './parser'
+import { type ParseOptions, parseSVG } from './parser'
 import { encodePng } from './png'
 import { rasterize, type RenderOptions } from './render'
 
 /** Parse + rasterise + encode in one call. */
-export function svgToPng(svg: string, opts?: RenderOptions): Buffer {
-  const root = parseSVG(svg)
+export function svgToPng(svg: string, opts?: RenderOptions & ParseOptions): Buffer {
+  const root = parseSVG(svg, { colorScheme: opts?.colorScheme })
   const fb = rasterize(root, opts)
   return encodePng(fb)
 }

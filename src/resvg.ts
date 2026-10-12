@@ -14,7 +14,7 @@
 import type { Buffer } from 'node:buffer'
 import type { FontResolver, SVGRoot } from './types'
 import { encodePng } from './png'
-import { parseSVG } from './parser'
+import { type ColorScheme, parseSVG } from './parser'
 import { rasterize, type RenderOptions } from './render'
 import type { Framebuffer } from './raster'
 
@@ -37,6 +37,8 @@ export interface ResvgOptions {
   tolerance?: number
   /** Resolves `currentColor` references. */
   currentColor?: string
+  /** Draw the SVG's `@media (prefers-color-scheme: dark)` rules (`'dark'`) or not. @default 'light' */
+  colorScheme?: ColorScheme
   /** Hard cap on `<use>` recursion. */
   maxUseDepth?: number
   /** Resolves `<text>` font lookups. Without it `<text>` is skipped. */
@@ -105,7 +107,7 @@ export class Resvg {
     }
     this.renderOptions = opts
     this.aspectMode = aspectMode
-    this.root = parseSVG(svg)
+    this.root = parseSVG(svg, { colorScheme: options.colorScheme })
   }
 
   render(): RenderedImage {
