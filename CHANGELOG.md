@@ -1,3 +1,17 @@
+[Compare changes](https://github.com/stacksjs/ts-svg/compare/v0.1.4...v0.1.5)
+
+## 🚀 Features
+
+- draw an SVG's dark colour-scheme rules, and let later CSS rules win ([50889ff](https://github.com/stacksjs/ts-svg/commit/50889ff)) _(by Chris <chrisbreuer93@gmail.com>)_
+
+## 🧹 Chores
+
+- release v0.1.5 ([cd7a5d6](https://github.com/stacksjs/ts-svg/commit/cd7a5d6)) _(by Chris <chrisbreuer93@gmail.com>)_
+
+## Contributors
+
+- _Chris <chrisbreuer93@gmail.com>_
+
 [Compare changes](https://github.com/stacksjs/ts-svg/compare/v0.1.3...v0.1.4)
 
 ## 🐛 Bug Fixes
