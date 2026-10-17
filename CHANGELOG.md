@@ -1,3 +1,17 @@
+[Compare changes](https://github.com/stacksjs/ts-svg/compare/v0.1.5...v0.1.6)
+
+## 🐛 Bug Fixes
+
+- preserve stroke rail order around open path bends ([1ad7738](https://github.com/stacksjs/ts-svg/commit/1ad7738)) _(by Chris <chrisbreuer93@gmail.com>)_
+
+## 🧹 Chores
+
+- release v0.1.6 ([f748758](https://github.com/stacksjs/ts-svg/commit/f748758)) _(by Chris <chrisbreuer93@gmail.com>)_
+
+## Contributors
+
+- _Chris <chrisbreuer93@gmail.com>_
+
 [Compare changes](https://github.com/stacksjs/ts-svg/compare/v0.1.4...v0.1.5)
 
 ## 🚀 Features
