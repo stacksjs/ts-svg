@@ -431,3 +431,19 @@ describe('stylesheet cascade and colour scheme', () => {
     expect(pixel(svg)).toEqual([0, 255, 0, 255])
   })
 })
+
+
+describe('bent open strokes preserve rail order', () => {
+  for (const join of ['round', 'bevel', 'miter']) {
+    it(`does not fill a diagonal across a bent road with ${join} joins`, () => {
+      const buf = render(`<svg width="100" height="100"><path d="M10 10 L80 10 L80 80 L20 80" fill="none" stroke="black" stroke-width="4" stroke-linejoin="${join}"/></svg>`)
+      for (const [x, y] of [[40, 10], [80, 45], [45, 80]]) expect(pixelAt(buf, x!, y!).a).toBeGreaterThan(240)
+      for (const [x, y] of [[40, 40], [60, 30], [40, 60]]) expect(pixelAt(buf, x!, y!).a).toBe(0)
+    })
+  }
+  it('keeps a square end cap connected to its own endpoint', () => {
+    const buf = render('<svg width="100" height="100"><path d="M10 10 L80 10 L80 80" fill="none" stroke="black" stroke-width="8" stroke-linecap="square"/></svg>')
+    expect(pixelAt(buf, 80, 82).a).toBeGreaterThan(240)
+    expect(pixelAt(buf, 40, 45).a).toBe(0)
+  })
+})

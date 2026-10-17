@@ -624,11 +624,15 @@ function strokeOutline(poly: number[], st: StrokeStyle, closed: boolean): number
     }
     // butt cap: no extension; the rails just start at the offset endpoints.
 
-    // Left rail: walk forward, emitting offsets + joins.
+    // Both rails must follow the same segment order. emitJoin appends to
+    // both; postponing right-side endpoints until after the joins creates
+    // chords across the path when that rail is reversed for filling.
     left.push(first.ax + first.nx * half, first.ay + first.ny * half)
+    right.push(first.ax - first.nx * half, first.ay - first.ny * half)
     for (let i = 0; i < segs.length; i++) {
       const s = segs[i]!
       left.push(s.bx + s.nx * half, s.by + s.ny * half)
+      right.push(s.bx - s.nx * half, s.by - s.ny * half)
       if (i + 1 < segs.length) emitJoin(s, segs[i + 1]!)
     }
 
@@ -648,19 +652,12 @@ function strokeOutline(poly: number[], st: StrokeStyle, closed: boolean): number
       }
     }
 
-    // Right rail forward (will be reversed into the final polygon).
-    right.push(first.ax - first.nx * half, first.ay - first.ny * half)
-    for (let i = 0; i < segs.length; i++) {
-      const s = segs[i]!
-      right.push(s.bx - s.nx * half, s.by - s.ny * half)
-    }
-
-    // Final order: [left fwd] + [right reversed] + [trailingStart] + [trailingEnd].
-    // This matches the original `unshift`-based output exactly, but builds in O(n).
+    // Finish the end cap before walking back along the right rail, then
+    // finish the start cap to close the outline.
     const combined: number[] = left.slice()
+    for (let i = 0; i < trailingEnd.length; i++) combined.push(trailingEnd[i]!)
     for (let i = right.length - 2; i >= 0; i -= 2) combined.push(right[i]!, right[i + 1]!)
     for (let i = 0; i < trailingStart.length; i++) combined.push(trailingStart[i]!)
-    for (let i = 0; i < trailingEnd.length; i++) combined.push(trailingEnd[i]!)
     return [combined]
   }
 
