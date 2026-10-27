@@ -11,7 +11,7 @@ import { loadConfig } from 'bunfig'
 export interface SvgConfig {
   /** Emit informational warnings to `console.warn` (e.g. unknown elements). */
   verbose: boolean
-  /** Default Bezier flattening tolerance in user units (pixels). */
+  /** Default maximum Bezier flattening deviation in output pixels. */
   tolerance: number
   /** Default background colour applied when none is passed to `rasterize`. */
   background: string

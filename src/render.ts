@@ -20,7 +20,7 @@ export interface RenderOptions {
   scale?: number
   /** Background colour (CSS string or RGBA). Defaults to transparent. */
   background?: string | RGBA
-  /** Bezier flattening tolerance in user-space units. Default 0.25 px. */
+  /** Optional user-space tolerance override. By default curves stay within 0.25 output pixels. */
   tolerance?: number
   /** Resolves `<text>` elements to a font. If unset, text is skipped. */
   fontResolver?: FontResolver
@@ -37,6 +37,7 @@ interface RenderCtx {
   /** SVG-user-space → device-pixel transform (composed with element transforms). */
   rootTransform: Matrix
   tolerance: number
+  toleranceInPixels: boolean
   fontResolver?: FontResolver
   imageResolver?: ImageResolver
   defs: SVGDefs
@@ -677,8 +678,17 @@ function drawShape(node: SVGNode, style: InheritedStyle, ctx: RenderCtx): void {
   if (node.tag === 'svg' || node.tag === 'g' || node.tag === 'use') return
   // Compute the user-space polygon set ONCE — both the fill and stroke passes
   // (and the stroke's bbox lookup for paint-server resolution) need it.
-  const userPolys = shapeToPolys(node as SVGElementNode, ctx.tolerance, ctx.fontResolver)
   const finalT = multiply(ctx.rootTransform, style.transform)
+  // Flatten before transforming, but measure the default error in output
+  // pixels. Otherwise a small icon scaled into an app icon magnifies each
+  // 0.25-unit chord into a visibly straight edge. The largest singular value
+  // bounds magnification for nested viewports, rotation, shear and scale.
+  const [a, b, c, d] = finalT
+  const sum = a * a + b * b + c * c + d * d
+  const determinant = a * d - b * c
+  const magnification = Math.sqrt((sum + Math.sqrt(Math.max(0, sum * sum - 4 * determinant * determinant))) / 2)
+  const tolerance = ctx.toleranceInPixels ? ctx.tolerance / Math.max(magnification, 1e-12) : ctx.tolerance
+  const userPolys = shapeToPolys(node as SVGElementNode, tolerance, ctx.fontResolver)
 
   const fillRef = style.fillRef
   const strokeRef = style.strokeRef
@@ -748,7 +758,7 @@ function drawShape(node: SVGNode, style: InheritedStyle, ctx: RenderCtx): void {
       : baseStroke
     if (!strokePaint) return
     if (node.tag === 'path') {
-      const polylines = pathToPolylines(node as SVGPath, ctx.tolerance)
+      const polylines = pathToPolylines(node as SVGPath, tolerance)
       for (let i = 0; i < polylines.length; i++) {
         const sp = polylines[i]!
         const dev = transformPoly(sp.points, finalT)
@@ -756,7 +766,7 @@ function drawShape(node: SVGNode, style: InheritedStyle, ctx: RenderCtx): void {
       }
     }
     else {
-      const lp = shapeToPolylines(node as SVGElementNode, ctx.tolerance, ctx.fontResolver)
+      const lp = shapeToPolylines(node as SVGElementNode, tolerance, ctx.fontResolver)
       if (lp.polys.length > 0) {
         const devPolys = new Array<number[]>(lp.polys.length)
         for (let i = 0; i < lp.polys.length; i++) devPolys[i] = transformPoly(lp.polys[i]!, finalT)
@@ -964,6 +974,7 @@ export function rasterize(root: SVGRoot, opts: RenderOptions = {}): Framebuffer 
     fb,
     rootTransform: root2dev,
     tolerance: opts.tolerance ?? config.tolerance,
+    toleranceInPixels: opts.tolerance === undefined,
     fontResolver: opts.fontResolver,
     imageResolver: opts.imageResolver,
     defs: root.defs,
