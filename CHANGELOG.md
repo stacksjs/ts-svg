@@ -1,3 +1,17 @@
+[Compare changes](https://github.com/stacksjs/ts-svg/compare/v0.1.6...v0.1.7)
+
+## 🐛 Bug Fixes
+
+- keep magnified SVG curves smooth in output pixels ([5f2735f](https://github.com/stacksjs/ts-svg/commit/5f2735f)) _(by Chris Breuer <chris@stacksjs.com>)_
+
+## 🧹 Chores
+
+- release v0.1.7 ([4a5a0bc](https://github.com/stacksjs/ts-svg/commit/4a5a0bc)) _(by Chris Breuer <chris@stacksjs.com>)_
+
+## Contributors
+
+- _Chris Breuer <chris@stacksjs.com>_
+
 [Compare changes](https://github.com/stacksjs/ts-svg/compare/v0.1.5...v0.1.6)
 
 ## 🐛 Bug Fixes
