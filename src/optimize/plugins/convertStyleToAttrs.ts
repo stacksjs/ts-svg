@@ -1,6 +1,6 @@
 /** Promote inline-style declarations to presentation attributes. (Adapted from SVGO, MIT.) */
-
 import type { Plugin } from '../types'
+import { csstree } from '@stacksjs/ts-css'
 import { attrsGroups } from './_collections'
 
 export interface ConvertStyleToAttrsParams {
@@ -13,15 +13,9 @@ export const description = 'converts style to attributes'
 const g = (...args: string[]): string => `(?:${args.join('|')})`
 const stylingProps = attrsGroups.presentation!
 const rEscape = '\\\\(?:[0-9a-f]{1,6}\\s?|\\r\\n|.)'
-const rAttr = `\\s*(${g('[^:;\\\\]', rEscape)}*?)\\s*`
 const rSingleQuotes = `'(?:[^'\\n\\r\\\\]|${rEscape})*?(?:'|$)`
 const rQuotes = `"(?:[^"\\n\\r\\\\]|${rEscape})*?(?:"|$)`
 const rQuotedString = new RegExp(`^${g(rSingleQuotes, rQuotes)}$`)
-const rParenthesis = `\\(${g('[^\'"()\\\\]+', rEscape, rSingleQuotes, rQuotes)}*?\\)`
-const rValue = `\\s*(${g('[^!\'"();\\\\]+?', rEscape, rSingleQuotes, rQuotes, rParenthesis, '[^;]*?')}*?)`
-const rDeclEnd = '\\s*(?:;\\s*|$)'
-const rImportant = '(\\s*!important(?![-(\\w]))?'
-const regDeclarationBlock = new RegExp(`${rAttr}:${rValue}${rImportant}${rDeclEnd}`, 'ig')
 const regStripComments = new RegExp(g(rEscape, rSingleQuotes, rQuotes, '/\\*[^]*?\\*/'), 'ig')
 
 export const fn: Plugin<ConvertStyleToAttrsParams> = (_root, params) => {
@@ -36,15 +30,25 @@ export const fn: Plugin<ConvertStyleToAttrsParams> = (_root, params) => {
             return match[0] === '/'
               ? ''
               : match[0] === '\\' && /[-g-z]/i.test(match[1]!)
-                ? match[1]!
-                : match
+              ? match[1]!
+              : match
           })
-          regDeclarationBlock.lastIndex = 0
-          let rule: RegExpExecArray | null
-          while ((rule = regDeclarationBlock.exec(styleValue)) != null) {
-            if (!keepImportant || !rule[3])
-              styles.push([rule[1]!, rule[2]!])
-          }
+          // Use the same CSS parser as the style cascade. The previous nested
+          // declaration regex had ambiguous nested captures rejected by bounded
+          // engines. Parse quoted delimiters as CSS tokens instead.
+          let malformed = false
+          const declarations = csstree.parse(styleValue, {
+            context: 'declarationList',
+            parseValue: false,
+            onParseError: () => { malformed = true },
+          })
+          // A recovering parse must not silently discard unknown CSS text.
+          if (malformed || declarations.type !== 'DeclarationList')
+            return
+          declarations.children.forEach((declaration) => {
+            if (declaration.type === 'Declaration' && (!keepImportant || !declaration.important))
+              styles.push([declaration.property, csstree.generate(declaration.value)])
+          })
 
           if (styles.length) {
             styles = styles.filter((style) => {
