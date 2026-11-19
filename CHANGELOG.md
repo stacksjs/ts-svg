@@ -1,3 +1,17 @@
+[Compare changes](https://github.com/stacksjs/ts-svg/compare/v0.1.7...v0.1.8)
+
+## 🐛 Bug Fixes
+
+- **optimize**: parse style declarations with existing CSS grammar ([367a010](https://github.com/stacksjs/ts-svg/commit/367a010)) _(by Chris Breuer <chris@stacksjs.com>)_
+
+## 🧹 Chores
+
+- release v0.1.8 ([388a5dc](https://github.com/stacksjs/ts-svg/commit/388a5dc)) _(by Chris Breuer <chris@stacksjs.com>)_
+
+## Contributors
+
+- _Chris Breuer <chris@stacksjs.com>_
+
 [Compare changes](https://github.com/stacksjs/ts-svg/compare/v0.1.6...v0.1.7)
 
 ## 🐛 Bug Fixes
